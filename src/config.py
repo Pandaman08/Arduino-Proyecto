@@ -54,15 +54,17 @@ RF_RANDOM_STATE: int = 42
 HISTORY_MAX_ROWS: int = 60
 
 # ==============================================================================
-# PARÁMETROS DE CONTROL TÉRMICO Y TOLERANCIAS ARDUINO
+# PARÁMETROS DE CONTROL TÉRMICO Y TOLERANCIAS ARDUINO (PROTOTIPO DEMO EN VIVO)
 # ==============================================================================
-DEFAULT_IDEAL_TEMP: float = 38.0
+# Calibrado -15°C respecto a la escala agroindustrial real (38°C -> 23°C)
+# para permitir demostración práctica inmediata a temperatura ambiente de aula/laboratorio
+DEFAULT_IDEAL_TEMP: float = 23.0
 TOLERANCIA_IDEAL_TEMP: float = 1.0  # ±1.0°C: Verde, Fan OFF
 UMBRAL_CERCA_TEMP: float = 3.5      # <= 3.5°C: Amarillo, Fan 60%
                                    # > 3.5°C: Rojo, Fan 100%
 
 # ==============================================================================
-# PERFILES CLIMÁTICOS DE REGIONES PRODUCTORAS DE PERÚ
+# PERFILES CLIMÁTICOS DE REGIONES PRODUCTORAS DE PERÚ (CALIBRADOS PARA PROTOTIPO)
 # ==============================================================================
 PERU_REGIONS_DATA = {
     "San Martín (Moyobamba / Tarapoto)": {
@@ -71,8 +73,8 @@ PERU_REGIONS_DATA = {
         "precipitacion_anual_mm": 2200,
         "riesgo_humedad": "Muy Alto (Peligro de moho/fermentación secundaria)",
         "humedad_tipica": 85.0,
-        "temp_base_ideal": 40.5,
-        "descripcion": "Zona con precipitaciones intensas y saturación higrométrica. Requiere temperaturas de secado de 40°C a 42°C para evitar contaminación por micotoxinas."
+        "temp_base_ideal": 25.5,  # Escala prototipo (-15°C de 40.5°C real)
+        "descripcion": "Zona de precipitaciones intensas y saturación higrométrica. Consigna prototipo calibrada a 25.5°C (reducida 15°C para demo en vivo)."
     },
     "Junín (Chanchamayo / Satipo)": {
         "departamento": "Junín",
@@ -80,8 +82,8 @@ PERU_REGIONS_DATA = {
         "precipitacion_anual_mm": 1850,
         "riesgo_humedad": "Alto (Lluvias frecuentes de tarde)",
         "humedad_tipica": 78.0,
-        "temp_base_ideal": 39.0,
-        "descripcion": "Valle emblemático cafetalero de selva central. Clima cálido húmedo, secado óptimo regulado a 38.5°C - 40°C."
+        "temp_base_ideal": 24.0,  # Escala prototipo (-15°C de 39.0°C real)
+        "descripcion": "Valle emblemático cafetalero de selva central. Consigna prototipo calibrada a 24.0°C para prueba en vivo."
     },
     "Cajamarca (Jaén / San Ignacio)": {
         "departamento": "Cajamarca",
@@ -89,8 +91,8 @@ PERU_REGIONS_DATA = {
         "precipitacion_anual_mm": 1150,
         "riesgo_humedad": "Moderado / Bajo",
         "humedad_tipica": 65.0,
-        "temp_base_ideal": 37.0,
-        "descripcion": "Mayor productor de cafés especiales del norte. Menor humedad relativa ambiental, ideal para secado controlado a 36°C - 38°C."
+        "temp_base_ideal": 22.0,  # Escala prototipo (-15°C de 37.0°C real)
+        "descripcion": "Mayor productor de cafés especiales del norte. Menor humedad relativa ambiental, consigna prototipo calibrada a 22.0°C."
     },
     "Cusco (Quillabamba / La Convención)": {
         "departamento": "Cusco",
@@ -98,8 +100,8 @@ PERU_REGIONS_DATA = {
         "precipitacion_anual_mm": 1450,
         "riesgo_humedad": "Moderado-Alto",
         "humedad_tipica": 72.0,
-        "temp_base_ideal": 38.0,
-        "descripcion": "Valles de alta pendiente con café y cacao chuncho. Secado recomendado entre 37.5°C y 39°C."
+        "temp_base_ideal": 23.0,  # Escala prototipo (-15°C de 38.0°C real)
+        "descripcion": "Valles de alta pendiente con café y cacao chuncho. Consigna prototipo calibrada a 23.0°C."
     },
     "Amazonas (Rodríguez de Mendoza)": {
         "departamento": "Amazonas",
@@ -107,8 +109,8 @@ PERU_REGIONS_DATA = {
         "precipitacion_anual_mm": 1700,
         "riesgo_humedad": "Alto (Neblina matutina y lloviznas)",
         "humedad_tipica": 80.0,
-        "temp_base_ideal": 39.5,
-        "descripcion": "Alta humedad ambiental persistente. Requiere secado forzado continuo a 39°C - 41°C."
+        "temp_base_ideal": 24.5,  # Escala prototipo (-15°C de 39.5°C real)
+        "descripcion": "Alta humedad ambiental persistente. Consigna prototipo calibrada a 24.5°C."
     },
     "Piura (Huancabamba)": {
         "departamento": "Piura",
@@ -116,8 +118,8 @@ PERU_REGIONS_DATA = {
         "precipitacion_anual_mm": 850,
         "riesgo_humedad": "Bajo (Clima templado seco)",
         "humedad_tipica": 58.0,
-        "temp_base_ideal": 36.0,
-        "descripcion": "Cafés de altura en microclimas secos. Temperatura ideal moderada (35°C - 37°C) para preservar aroma floral."
+        "temp_base_ideal": 21.0,  # Escala prototipo (-15°C de 36.0°C real)
+        "descripcion": "Cafés de altura en microclimas secos. Consigna prototipo calibrada a 21.0°C."
     },
     "Puno (Sandia / San Juan del Oro)": {
         "departamento": "Puno",
@@ -125,8 +127,8 @@ PERU_REGIONS_DATA = {
         "precipitacion_anual_mm": 1300,
         "riesgo_humedad": "Moderado",
         "humedad_tipica": 68.0,
-        "temp_base_ideal": 37.5,
-        "descripcion": "Zona de cafés premiados mundialmente. Secado controlado a 37°C - 39°C para proteger embrión."
+        "temp_base_ideal": 22.5,  # Escala prototipo (-15°C de 37.5°C real)
+        "descripcion": "Zona de cafés premiados mundialmente. Consigna prototipo calibrada a 22.5°C."
     }
 }
 

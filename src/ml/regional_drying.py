@@ -51,9 +51,9 @@ def predict_ideal_temperature(
 
     temp_calculada = base_temp + ajuste_hum + ajuste_temp
 
-    # Acotamiento seguro: Nunca exceder 43.0°C para proteger embriones (<45°C)
-    # y nunca descender de 35.0°C para garantizar cinética de deshidratación.
-    temp_ideal = max(35.0, min(43.0, temp_calculada))
+    # Acotamiento para escala prototipo (-15°C para demostración en vivo con temperatura ambiente):
+    # Permite validación visual inmediata en aula/laboratorio entre 20.0°C y 28.5°C
+    temp_ideal = max(20.0, min(28.5, temp_calculada))
     return round(temp_ideal, 1)
 
 

@@ -299,7 +299,7 @@ if 'estado_semaforo_codigo' not in st.session_state:
 if 'color_semaforo_led' not in st.session_state:
     st.session_state.color_semaforo_led = "VERDE"
 if 'sim_grano_actual' not in st.session_state:
-    st.session_state.sim_grano_actual = 43.5  # Inicia por encima para ver al ventilador enfriar
+    st.session_state.sim_grano_actual = 28.5  # Inicia a 28.5°C (5.5°C sobre la meta 23°C) para ver enfriar al ventilador
 
 # Estado y salud de sensores
 if 'sensor_dht_estado' not in st.session_state:
@@ -509,9 +509,9 @@ with tab_hardware:
     col_t_in, col_t_btn = st.columns([2.5, 2.4])
     with col_t_in:
         temp_input = st.number_input(
-            "Temperatura Ideal (°C):",
-            min_value=20.0,
-            max_value=50.0,
+            "Temperatura Ideal (°C) [Demo Prototipo -15°C]:",
+            min_value=15.0,
+            max_value=38.0,
             value=float(st.session_state.temp_ideal_consigna),
             step=0.5,
             key="temp_hardware_input"
@@ -594,9 +594,9 @@ with tab_analisis:
 
     perfil = PERU_REGIONS_DATA[region_sel]
     
-    # Estimación de Temperatura Ideal de Secado ML
+    # Estimación de Temperatura Ideal de Secado ML (calibrada para demo -15°C)
     hum_ref = st.session_state.ultima_hum_amb if st.session_state.ultima_hum_amb is not None else perfil["humedad_tipica"]
-    temp_ref = st.session_state.ultima_temp_amb if st.session_state.ultima_temp_amb is not None else 26.0
+    temp_ref = st.session_state.ultima_temp_amb if st.session_state.ultima_temp_amb is not None else 23.0
     temp_ideal_predicha = predict_ideal_temperature(region_sel, hum_ref, temp_ref)
 
     with col_reg2:
@@ -611,13 +611,13 @@ with tab_analisis:
     with col_t1:
         st.markdown(f"""
         <div class="prediction-card" style="border-color: #f59e0b; background: linear-gradient(135deg, #451a03 0%, #1e1b4b 100%);">
-            <div class="prediction-title" style="color: #fde68a;">🎯 Temp. Ideal Predicha (ML)</div>
+            <div class="prediction-title" style="color: #fde68a;">🎯 Temp. Ideal Prototipo (Demo)</div>
             <div class="prediction-value" style="color: #fbbf24;">{temp_ideal_predicha:.1f}</div>
-            <div class="prediction-unit" style="color: #fde68a;">°C (Consigna Óptima)</div>
+            <div class="prediction-unit" style="color: #fde68a;">°C (Consigna Activa)</div>
         </div>
         """, unsafe_allow_html=True)
     with col_t2:
-        st.caption("Esta temperatura ideal se envía al microcontrolador para regular automáticamente la convección del ventilador y el semáforo LED.")
+        st.caption("Consigna de temperatura ideal reducida 15°C para permitir demostración práctica inmediata a temperatura ambiente.")
         col_c_sync, col_c_man = st.columns([1.3, 1.7])
         with col_c_sync:
             st.write("")
@@ -628,8 +628,8 @@ with tab_analisis:
         with col_c_man:
             temp_manual = st.number_input(
                 "Ajustar Consigna de Secado (°C):",
-                min_value=20.0,
-                max_value=48.0,
+                min_value=15.0,
+                max_value=38.0,
                 value=float(st.session_state.temp_ideal_consigna),
                 step=0.5,
                 key="temp_ideal_analisis_input"

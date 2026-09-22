@@ -67,8 +67,8 @@ bool modoAnalisisActivo = false;
 unsigned long ultimaLecturaMs = 0;
 const unsigned long INTERVALO_ENVIO_MS = 2000;
 
-// Parámetros de Control Térmico Automático (Consigna ML)
-float tempIdeal = 38.0;               // Temperatura ideal objetivo por defecto (°C)
+// Parámetros de Control Térmico Automático (Consigna ML Prototipo -15°C para Demo en Vivo)
+float tempIdeal = 23.0;               // Temperatura ideal prototipo calibrada para demostración en vivo (°C)
 const float TOLERANCIA_IDEAL = 1.0;   // ±1.0 °C: Ideal alcanzada (Verde, Fan OFF)
 const float UMBRAL_CERCA = 3.5;       // Hasta 3.5 °C de distancia: En camino (Amarillo, Fan 60%)
                                       // Más de 3.5 °C: Falta mucho (Rojo, Fan 100%)
@@ -129,13 +129,13 @@ void loop() {
           valorStr.trim();
         }
         float nuevaTemp = valorStr.toFloat();
-        if (nuevaTemp >= 15.0 && nuevaTemp <= 60.0) {
+        if (nuevaTemp >= 10.0 && nuevaTemp <= 50.0) {
           tempIdeal = nuevaTemp;
           Serial.print("ACK: Temp Ideal fijada a ");
           Serial.print(tempIdeal, 1);
           Serial.println(" C");
         } else {
-          Serial.println("ERR: Temp ideal fuera de rango (15-60 C)");
+          Serial.println("ERR: Temp ideal fuera de rango (10-50 C)");
         }
         break;
       }
