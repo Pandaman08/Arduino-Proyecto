@@ -37,6 +37,32 @@ MODEL_PATH = BASE_DIR / "models" / "modelo_secado.pkl"
 if not MODEL_PATH.parent.exists():
     MODEL_PATH = BASE_DIR / "modelo_secado.pkl"
 
+# Integración del modelo regional de Perú y control térmico
+try:
+    from src.config import (
+        PERU_REGIONS_DATA,
+        DEFAULT_IDEAL_TEMP,
+        TOLERANCIA_IDEAL_TEMP,
+        UMBRAL_CERCA_TEMP
+    )
+    from src.ml.regional_drying import (
+        predict_ideal_temperature,
+        evaluate_thermal_state
+    )
+except ImportError:
+    import sys
+    sys.path.insert(0, str(BASE_DIR))
+    from src.config import (
+        PERU_REGIONS_DATA,
+        DEFAULT_IDEAL_TEMP,
+        TOLERANCIA_IDEAL_TEMP,
+        UMBRAL_CERCA_TEMP
+    )
+    from src.ml.regional_drying import (
+        predict_ideal_temperature,
+        evaluate_thermal_state
+    )
+
 # Estilos CSS profesionales para panel IoT
 st.markdown("""
 <style>
@@ -68,6 +94,42 @@ st.markdown("""
     .badge-normal { background-color: rgba(0, 180, 216, 0.2); color: #caf0f8; }
     .badge-final { background-color: rgba(46, 204, 113, 0.25); color: #a3e635; }
     .badge-danger { background-color: rgba(239, 68, 68, 0.3); color: #fca5a5; border: 1px solid #ef4444; }
+    
+    /* Semáforo Térmico de Secado (Lazo Cerrado) */
+    .semaforo-banner {
+        border-radius: 12px;
+        padding: 1rem 1.4rem;
+        margin: 0.9rem 0;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.15);
+        font-family: inherit;
+    }
+    .semaforo-verde {
+        background: linear-gradient(135deg, rgba(34, 197, 94, 0.18) 0%, rgba(22, 101, 52, 0.35) 100%);
+        border: 2px solid #22c55e;
+        color: #bbf7d0;
+    }
+    .semaforo-amarillo {
+        background: linear-gradient(135deg, rgba(234, 179, 8, 0.18) 0%, rgba(133, 77, 14, 0.35) 100%);
+        border: 2px solid #eab308;
+        color: #fef08a;
+    }
+    .semaforo-rojo {
+        background: linear-gradient(135deg, rgba(239, 68, 68, 0.2) 0%, rgba(127, 29, 29, 0.38) 100%);
+        border: 2px solid #ef4444;
+        color: #fecaca;
+    }
+    .badge-semaforo-pill {
+        padding: 6px 14px;
+        border-radius: 20px;
+        font-weight: 700;
+        font-size: 0.85rem;
+        letter-spacing: 0.5px;
+        background: rgba(0, 0, 0, 0.35);
+        border: 1px solid rgba(255, 255, 255, 0.2);
+    }
     
     /* Tarjetas de Diagnóstico Adaptativas (Modo Oscuro y Claro) */
     .diag-card {
@@ -215,7 +277,7 @@ if 'ultimo_comando' not in st.session_state:
 if 'lineas_corruptas' not in st.session_state:
     st.session_state.lineas_corruptas = 0
 
-# Estado de actuadores y pantalla
+# Estado de actuadores, semáforo y pantalla
 if 'estado_led_verde' not in st.session_state:
     st.session_state.estado_led_verde = False
 if 'estado_led_amarillo' not in st.session_state:
@@ -226,6 +288,18 @@ if 'estado_ventilador' not in st.session_state:
     st.session_state.estado_ventilador = "0% (Apagado)"
 if 'texto_display_actual' not in st.session_state:
     st.session_state.texto_display_actual = "SECADO CAFE IA"
+
+# Parámetros y Estado del Lazo Cerrado de Temperatura Ideal (Perú)
+if 'region_seleccionada' not in st.session_state:
+    st.session_state.region_seleccionada = "San Martín (Moyobamba / Tarapoto)"
+if 'temp_ideal_consigna' not in st.session_state:
+    st.session_state.temp_ideal_consigna = DEFAULT_IDEAL_TEMP
+if 'estado_semaforo_codigo' not in st.session_state:
+    st.session_state.estado_semaforo_codigo = "IDEAL_ALCANZADA"
+if 'color_semaforo_led' not in st.session_state:
+    st.session_state.color_semaforo_led = "VERDE"
+if 'sim_grano_actual' not in st.session_state:
+    st.session_state.sim_grano_actual = 43.5  # Inicia por encima para ver al ventilador enfriar
 
 # Estado y salud de sensores
 if 'sensor_dht_estado' not in st.session_state:
@@ -248,9 +322,15 @@ def enviar_comando(caracter: str, descripcion: str = "") -> bool:
     # Actualización reactiva del estado virtual de actuadores
     if caracter in ('V', 'v'):
         st.session_state.estado_led_verde = True
+        st.session_state.estado_led_amarillo = False
+        st.session_state.estado_led_rojo = False
     elif caracter in ('A', 'a'):
+        st.session_state.estado_led_verde = False
         st.session_state.estado_led_amarillo = True
+        st.session_state.estado_led_rojo = False
     elif caracter in ('R', 'r'):
+        st.session_state.estado_led_verde = False
+        st.session_state.estado_led_amarillo = False
         st.session_state.estado_led_rojo = True
     elif caracter == '1':
         st.session_state.estado_ventilador = "60% (PWM 153)"
@@ -263,6 +343,12 @@ def enviar_comando(caracter: str, descripcion: str = "") -> bool:
         st.session_state.estado_ventilador = "0% (Apagado)"
     elif caracter.startswith('D:') or caracter.startswith('d:'):
         st.session_state.texto_display_actual = caracter[2:].strip()
+    elif caracter.startswith('T:') or caracter.startswith('t:'):
+        try:
+            val_str = caracter[2:].strip()
+            st.session_state.temp_ideal_consigna = float(val_str)
+        except ValueError:
+            pass
 
     ser = st.session_state.serial_conn
     if ser is not None and getattr(ser, 'is_open', False):
@@ -418,6 +504,27 @@ with tab_hardware:
     c_st4.metric("Ventilador (D9 PWM)", st.session_state.estado_ventilador)
 
     st.markdown("---")
+    st.markdown("#### 🎯 Consigna de Temperatura Ideal (Comando 'T:XX.X')")
+    st.caption("Fija en el microcontrolador la temperatura ideal hacia la cual debe regular el lazo cerrado.")
+    col_t_in, col_t_btn = st.columns([2.5, 2.4])
+    with col_t_in:
+        temp_input = st.number_input(
+            "Temperatura Ideal (°C):",
+            min_value=20.0,
+            max_value=50.0,
+            value=float(st.session_state.temp_ideal_consigna),
+            step=0.5,
+            key="temp_hardware_input"
+        )
+    with col_t_btn:
+        st.write("")
+        st.write("")
+        if st.button("📤 Enviar Consigna Térmica", use_container_width=True, disabled=not esta_conectado):
+            if enviar_comando(f"T:{temp_input:.1f}", f"Consigna Térmica {temp_input:.1f}°C"):
+                st.session_state.temp_ideal_consigna = temp_input
+                st.toast(f"Comando 'T:{temp_input:.1f}' enviado al Arduino", icon="🎯")
+
+    st.markdown("---")
     st.markdown("#### 📟 Prueba de Pantalla LCD (I2C 16x2)")
     st.caption("Escribe una frase y envíala al Arduino para desplegarla en la pantalla LCD (Pines A4 SDA y A5 SCL del Arduino Nano).")
 
@@ -468,12 +575,79 @@ with tab_hardware:
 # ------------------------------------------------------------------------------
 with tab_analisis:
     st.subheader("Monitoreo y Predicción en Tiempo Real")
-    st.caption("Al presionar 'Iniciar Análisis' se envía el comando 'I' al Arduino Nano para recibir los datos de los sensores cada 2 segundos y estimar el tiempo restante.")
+    st.caption("Predicción de temperatura ideal de secado por región de Perú y control automático en lazo cerrado con Arduino Nano.")
 
-    col_btn_ini, col_btn_pau, _ = st.columns([1.2, 1.2, 3])
+    # 1. Selector de Región Cafetalera / Cacaotera de Perú
+    st.markdown("#### 🇵🇪 Región Cafetalera / Cacaotera de Perú (Predicción de Temperatura Ideal)")
+    regiones_lista = list(PERU_REGIONS_DATA.keys())
+    idx_def = regiones_lista.index(st.session_state.region_seleccionada) if st.session_state.region_seleccionada in regiones_lista else 0
+
+    col_reg1, col_reg2 = st.columns([1.5, 2.5])
+    with col_reg1:
+        region_sel = st.selectbox(
+            "Región de Producción:",
+            options=regiones_lista,
+            index=idx_def,
+            help="Adapta la consigna según las condiciones psicrométricas y precipitaciones típicas de cada zona productora del Perú."
+        )
+        st.session_state.region_seleccionada = region_sel
+
+    perfil = PERU_REGIONS_DATA[region_sel]
+    
+    # Estimación de Temperatura Ideal de Secado ML
+    hum_ref = st.session_state.ultima_hum_amb if st.session_state.ultima_hum_amb is not None else perfil["humedad_tipica"]
+    temp_ref = st.session_state.ultima_temp_amb if st.session_state.ultima_temp_amb is not None else 26.0
+    temp_ideal_predicha = predict_ideal_temperature(region_sel, hum_ref, temp_ref)
+
+    with col_reg2:
+        st.info(
+            f"🌧️ **Zona:** {perfil['zona']} | **Precipitación:** `{perfil['precipitacion_anual_mm']} mm/año` | **Humedad Típica:** `{perfil['humedad_tipica']}%`\n\n"
+            f"⚠️ **Riesgo:** {perfil['riesgo_humedad']}\n\n"
+            f"💡 *{perfil['descripcion']}*"
+        )
+
+    # 2. Tarjetas de Consigna de Temperatura y Control
+    col_t1, col_t2 = st.columns([1.4, 2.6])
+    with col_t1:
+        st.markdown(f"""
+        <div class="prediction-card" style="border-color: #f59e0b; background: linear-gradient(135deg, #451a03 0%, #1e1b4b 100%);">
+            <div class="prediction-title" style="color: #fde68a;">🎯 Temp. Ideal Predicha (ML)</div>
+            <div class="prediction-value" style="color: #fbbf24;">{temp_ideal_predicha:.1f}</div>
+            <div class="prediction-unit" style="color: #fde68a;">°C (Consigna Óptima)</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with col_t2:
+        st.caption("Esta temperatura ideal se envía al microcontrolador para regular automáticamente la convección del ventilador y el semáforo LED.")
+        col_c_sync, col_c_man = st.columns([1.3, 1.7])
+        with col_c_sync:
+            st.write("")
+            if st.button("📤 Sincronizar con Arduino", use_container_width=True, disabled=not esta_conectado):
+                if enviar_comando(f"T:{temp_ideal_predicha:.1f}", f"Temp Ideal {temp_ideal_predicha:.1f}°C"):
+                    st.session_state.temp_ideal_consigna = temp_ideal_predicha
+                    st.toast(f"Consigna T:{temp_ideal_predicha:.1f}°C transmitida al Arduino", icon="🎯")
+        with col_c_man:
+            temp_manual = st.number_input(
+                "Ajustar Consigna de Secado (°C):",
+                min_value=20.0,
+                max_value=48.0,
+                value=float(st.session_state.temp_ideal_consigna),
+                step=0.5,
+                key="temp_ideal_analisis_input"
+            )
+            if temp_manual != st.session_state.temp_ideal_consigna:
+                st.session_state.temp_ideal_consigna = temp_manual
+                if esta_conectado:
+                    enviar_comando(f"T:{temp_manual:.1f}", f"Ajuste manual {temp_manual:.1f}°C")
+
+    st.markdown("---")
+
+    col_btn_ini, col_btn_pau, _ = st.columns([1.3, 1.3, 2.4])
     
     with col_btn_ini:
         if st.button("▶ Iniciar Análisis", type="primary", use_container_width=True, disabled=not esta_conectado or st.session_state.analisis_en_ejecucion):
+            # Enviar automáticamente la consigna térmica predicha antes de iniciar
+            enviar_comando(f"T:{st.session_state.temp_ideal_consigna:.1f}", f"Consigna Inicial {st.session_state.temp_ideal_consigna:.1f}°C")
+            time.sleep(0.1)
             enviar_comando('I', "Iniciar Análisis y Telemetría")
             st.session_state.analisis_en_ejecucion = True
             st.rerun()
@@ -485,6 +659,7 @@ with tab_analisis:
             st.rerun()
 
     status_area = st.empty()
+    semaforo_area = st.empty()
     metrics_area = st.container()
     charts_area = st.empty()
     log_area = st.expander("📝 Registro de Comunicaciones Serial y Depuración", expanded=False)
@@ -498,9 +673,28 @@ with tab_analisis:
             try:
                 if modo_simulacion:
                     time.sleep(2.0)
-                    sim_t_amb = round(float(np.random.uniform(24.0, 36.0)), 1)
-                    sim_h_amb = round(float(np.random.uniform(45.0, 75.0)), 1)
-                    sim_t_grano = round(sim_t_amb + float(np.random.uniform(-1.0, 3.5)), 1)
+                    sim_t_amb = round(float(np.random.uniform(25.0, 31.0)), 1)
+                    sim_h_amb = round(float(np.random.uniform(55.0, 78.0)), 1)
+                    
+                    # Dinámica de simulación reactiva del lazo cerrado
+                    ideal_t = st.session_state.temp_ideal_consigna
+                    grano_prev = st.session_state.get('sim_grano_actual', ideal_t + 4.0)
+                    error_sim = grano_prev - ideal_t
+
+                    if abs(error_sim) > 3.5:
+                        # Lejos: Ventilador al 100% reduce la temperatura rápidamente
+                        grano_prev -= 0.8
+                    elif abs(error_sim) > 1.0:
+                        # En camino: Ventilador al 60% reduce suavemente
+                        grano_prev -= 0.4
+                    else:
+                        # Meta alcanzada: Ventilador apagado. Fluctúa levemente
+                        # Ocasionalmente sube para demostrar que el ventilador se vuelve a prender
+                        fluctuacion = float(np.random.choice([-0.2, 0.0, 0.2, 1.8], p=[0.3, 0.4, 0.2, 0.1]))
+                        grano_prev = ideal_t + fluctuacion
+
+                    st.session_state.sim_grano_actual = round(grano_prev, 1)
+                    sim_t_grano = st.session_state.sim_grano_actual
                     raw_line = f"{sim_t_amb},{sim_h_amb},{sim_t_grano}"
                 else:
                     if ser is None or not ser.is_open:
@@ -534,7 +728,18 @@ with tab_analisis:
                 st.session_state.ultima_temp_grano = temp_grano
                 st.session_state.ultima_hora_lectura = ahora
 
-                # Inferencia con Random Forest
+                # Evaluación de Lazo Cerrado y Semáforo Térmico
+                estado_termico, color_led, pwm_fan, label_fan = evaluate_thermal_state(
+                    temp_grano, st.session_state.temp_ideal_consigna
+                )
+                st.session_state.estado_semaforo_codigo = estado_termico
+                st.session_state.color_semaforo_led = color_led
+                st.session_state.estado_ventilador = label_fan
+                st.session_state.estado_led_verde = (color_led == "VERDE")
+                st.session_state.estado_led_amarillo = (color_led == "AMARILLO")
+                st.session_state.estado_led_rojo = (color_led == "ROJO")
+
+                # Inferencia con Random Forest para tiempo restante
                 features = pd.DataFrame([{
                     'Temp_Ambiente': temp_amb,
                     'Humedad_Ambiente': hum_amb,
@@ -561,6 +766,7 @@ with tab_analisis:
                     'Temp_Ambiente': temp_amb,
                     'Humedad_Ambiente': hum_amb,
                     'Temp_Grano': temp_grano,
+                    'Temp_Ideal': st.session_state.temp_ideal_consigna,
                     'Tiempo_Restante_Estimado': round(tiempo_restante, 1)
                 }
                 st.session_state.historial = pd.concat([
@@ -568,14 +774,55 @@ with tab_analisis:
                     pd.DataFrame([fila])
                 ], ignore_index=True).tail(60)
 
+                # Renderizado del Semáforo Térmico
+                if color_led == "VERDE":
+                    css_banner = "semaforo-verde"
+                    icono_banner = "🟢"
+                    texto_banner = "TEMPERATURA IDEAL ALCANZADA (Diferencia ≤ ±1.0°C)"
+                    accion_banner = "Ventilador APAGADO (0%) — Preservando temperatura ideal de secado"
+                elif color_led == "AMARILLO":
+                    css_banner = "semaforo-amarillo"
+                    icono_banner = "🟡"
+                    texto_banner = "EN CAMINO A LA TEMPERATURA IDEAL (Diferencia ≤ 3.5°C)"
+                    accion_banner = "Ventilador al 60% (PWM 153) — Estabilización suave en curso"
+                else:
+                    css_banner = "semaforo-rojo"
+                    icono_banner = "🔴"
+                    texto_banner = "FALTA MUCHO PARA LA TEMPERATURA IDEAL (Diferencia > 3.5°C)"
+                    accion_banner = "Ventilador al 100% (PWM 255) — Máxima convección para forzar ajuste"
+
+                with semaforo_area:
+                    delta_t = temp_grano - st.session_state.temp_ideal_consigna
+                    st.markdown(f"""
+                    <div class="semaforo-banner {css_banner}">
+                        <div>
+                            <div style="font-size: 1.15rem; font-weight: 800; display: flex; align-items: center; gap: 8px;">
+                                {icono_banner} {texto_banner}
+                            </div>
+                            <div style="font-size: 0.92rem; margin-top: 4px; opacity: 0.92;">
+                                ⚙️ {accion_banner}
+                            </div>
+                        </div>
+                        <div class="badge-semaforo-pill">
+                            Consigna: {st.session_state.temp_ideal_consigna:.1f}°C | Grano: {temp_grano:.1f}°C (Δ {delta_t:+.1f}°C)
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
                 with metrics_area:
-                    col1, col2, col3, col4 = st.columns([1, 1, 1, 1.3])
+                    col1, col2, col3, col4 = st.columns([1, 1, 1.2, 1.3])
                     with col1:
                         st.metric("🌡️ Temp. Ambiente", f"{temp_amb:.1f} °C", delta=f"{temp_amb - 25.0:+.1f} vs ref")
                     with col2:
                         st.metric("💧 Humedad Relativa", f"{hum_amb:.1f} %", delta=f"{hum_amb - 60.0:+.1f} vs ref", delta_color="inverse")
                     with col3:
-                        st.metric("🌾 Temp. Grano", f"{temp_grano:.1f} °C", delta=f"{temp_grano - temp_amb:+.1f} vs amb")
+                        delta_grano_ideal = temp_grano - st.session_state.temp_ideal_consigna
+                        st.metric(
+                            "🌾 Temp. Grano",
+                            f"{temp_grano:.1f} °C",
+                            delta=f"{delta_grano_ideal:+.1f}°C vs ideal ({st.session_state.temp_ideal_consigna:.1f}°C)",
+                            delta_color="off" if abs(delta_grano_ideal) <= 1.0 else ("inverse" if delta_grano_ideal > 0 else "normal")
+                        )
                     with col4:
                         st.markdown(f"""
                         <div class="prediction-card">
@@ -588,18 +835,19 @@ with tab_analisis:
 
                 with charts_area:
                     if not st.session_state.historial.empty:
-                        st.markdown("#### 📈 Dinámica de Secado")
+                        st.markdown("#### 📈 Dinámica Térmica y Cinética de Secado")
                         df_chart = st.session_state.historial.set_index('Timestamp')
                         c_ch1, c_ch2 = st.columns(2)
                         with c_ch1:
-                            st.caption("Variables Físicas (Temperaturas y Humedad)")
-                            st.line_chart(df_chart[['Temp_Ambiente', 'Humedad_Ambiente', 'Temp_Grano']], height=240)
+                            st.caption("Seguimiento de Lazo Cerrado (Temp. Grano vs Temp. Ideal)")
+                            cols_plot = ['Temp_Grano', 'Temp_Ideal', 'Temp_Ambiente'] if 'Temp_Ideal' in df_chart.columns else ['Temp_Grano', 'Temp_Ambiente']
+                            st.line_chart(df_chart[cols_plot], height=240)
                         with c_ch2:
                             st.caption("Curva de Tiempo Restante Estimado por IA (Horas)")
                             st.line_chart(df_chart[['Tiempo_Restante_Estimado']], height=240, color="#00b4d8")
 
                 with log_area:
-                    st.text(f"[{ahora}] Datos: '{raw_line}' -> Predicción: {tiempo_restante:.2f} h")
+                    st.text(f"[{ahora}] Datos: '{raw_line}' | Semáforo: {color_led} | Fan: {label_fan} | Predicción: {tiempo_restante:.2f} h")
 
             except (ValueError, IndexError) as err_ruido:
                 st.session_state.lineas_corruptas += 1
@@ -619,7 +867,7 @@ with tab_analisis:
                 time.sleep(0.05)
 
     else:
-        status_area.warning("⚠️ Análisis en pausa. Presiona **'▶ Iniciar Análisis'** para enviar el comando 'I' al Arduino y comenzar la recepción continua.")
+        status_area.warning("⚠️ Análisis en pausa. Selecciona tu región de Perú y presiona **'▶ Iniciar Análisis'** para enviar la consigna y comenzar la regulación continua.")
         if not st.session_state.historial.empty:
             st.markdown("#### 📊 Últimos datos registrados en la sesión")
             st.dataframe(st.session_state.historial, use_container_width=True)
@@ -669,17 +917,25 @@ with tab_estado:
 
     st.markdown("---")
 
-    # 2. ESTADO DE ACTUADORES
-    st.markdown("### ⚙️ 2. Actuadores y Etapas de Potencia")
+    # 2. ESTADO DE ACTUADORES Y CONTROL EN LAZO CERRADO
+    st.markdown("### ⚙️ 2. Actuadores y Etapas de Potencia (Lazo Cerrado ML)")
+    
+    # Resumen de consigna térmica activa
+    st.info(
+        f"🎯 **Consigna Térmica Activa en Arduino:** `{st.session_state.temp_ideal_consigna:.1f} °C` | "
+        f"**Región Configurada:** `{st.session_state.region_seleccionada}` | "
+        f"**Semáforo Actual:** `{st.session_state.color_semaforo_led}`"
+    )
+
     col_a1, col_a2, col_a3 = st.columns(3)
 
     with col_a1:
         st.markdown(f"""
         <div class="diag-card">
             <div class="diag-title">🟢 LED Verde <span class="diag-pin">Pin D4</span></div>
-            <p><strong>Comando:</strong> 'V'</p>
+            <p><strong>Función en Lazo:</strong> Meta Térmica Alcanzada (±1.0°C)</p>
             <p><strong>Estado:</strong> {'<span class="diag-status-ok">ENCENDIDO</span>' if st.session_state.estado_led_verde else '<span class="diag-status-off">Apagado</span>'}</p>
-            <p class="diag-muted">Indicador de sistema en reposo / estado normal.</p>
+            <p class="diag-muted">Se activa cuando el grano llega a la temperatura ideal calculada por el ML. Apaga el ventilador.</p>
         </div>
         """, unsafe_allow_html=True)
 
@@ -687,9 +943,9 @@ with tab_estado:
         st.markdown(f"""
         <div class="diag-card">
             <div class="diag-title">🟡 LED Amarillo <span class="diag-pin">Pin D6</span></div>
-            <p><strong>Comando:</strong> 'A'</p>
+            <p><strong>Función en Lazo:</strong> En Camino a la Ideal (1.0°C a 3.5°C)</p>
             <p><strong>Estado:</strong> {'<span class="diag-status-warn">ENCENDIDO</span>' if st.session_state.estado_led_amarillo else '<span class="diag-status-off">Apagado</span>'}</p>
-            <p class="diag-muted">Indicador de etapa intermedia de deshidratación.</p>
+            <p class="diag-muted">Aproximación progresiva. El ventilador modula al 60% PWM (153) para estabilización suave.</p>
         </div>
         """, unsafe_allow_html=True)
 
@@ -697,9 +953,9 @@ with tab_estado:
         st.markdown(f"""
         <div class="diag-card">
             <div class="diag-title">🔴 LED Rojo <span class="diag-pin">Pin D5</span></div>
-            <p><strong>Comando:</strong> 'R'</p>
+            <p><strong>Función en Lazo:</strong> Falta Mucho / Desviación (>3.5°C)</p>
             <p><strong>Estado:</strong> {'<span class="diag-status-err">ENCENDIDO</span>' if st.session_state.estado_led_rojo else '<span class="diag-status-off">Apagado</span>'}</p>
-            <p class="diag-muted">Alarma por sobrecalentamiento crítico (>45°C).</p>
+            <p class="diag-muted">Diferencia térmica amplia. El ventilador opera al 100% PWM (255) a máxima potencia.</p>
         </div>
         """, unsafe_allow_html=True)
 
@@ -708,10 +964,10 @@ with tab_estado:
     with col_a4:
         st.markdown(f"""
         <div class="diag-card">
-            <div class="diag-title">💨 Ventilador <span class="diag-pin">Pin D9 PWM</span></div>
-            <p><strong>Comandos:</strong> '1' (60%) | '2' (100%) | '0' (Apagar)</p>
-            <p><strong>Potencia Actual:</strong> <span class="diag-status-ok">{st.session_state.estado_ventilador}</span></p>
-            <p class="diag-muted">Extractor de vapor y convección forzada.</p>
+            <div class="diag-title">💨 Ventilador de Convección <span class="diag-pin">Pin D9 PWM</span></div>
+            <p><strong>Régimen Actual:</strong> <span class="diag-status-ok">{st.session_state.estado_ventilador}</span></p>
+            <p><strong>Consigna de Regulación:</strong> <code>T:{st.session_state.temp_ideal_consigna:.1f}°C</code></p>
+            <p class="diag-muted">Se apaga al alcanzar la temperatura ideal (Verde). Se reactiva automáticamente si la temperatura se desvía.</p>
         </div>
         """, unsafe_allow_html=True)
 
@@ -719,9 +975,9 @@ with tab_estado:
         st.markdown(f"""
         <div class="diag-card">
             <div class="diag-title">📟 Pantalla LCD 16x2 <span class="diag-pin">Pines A4 (SDA) / A5 (SCL) I2C</span></div>
-            <p><strong>Comando:</strong> 'D:&lt;texto&gt;'</p>
-            <p><strong>Último Texto Desplegado:</strong> <code>{st.session_state.texto_display_actual or "Vacío / Limpio"}</code></p>
-            <p class="diag-muted">Display local para el operario en el módulo de secado.</p>
+            <p><strong>Línea 1 Telemetría:</strong> <code>A:&lt;TempAmb&gt; H:&lt;HumAmb&gt;</code></p>
+            <p><strong>Línea 2 Telemetría:</strong> <code>G:&lt;TempGrano&gt; Id:&lt;TempIdeal&gt;</code></p>
+            <p class="diag-muted">Muestra en tiempo real Temperatura Ambiente, Humedad, Grano y la Consigna Ideal fijada por ML.</p>
         </div>
         """, unsafe_allow_html=True)
 

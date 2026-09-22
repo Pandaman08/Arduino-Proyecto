@@ -8,21 +8,32 @@
   
   Conexión de Actuadores y Pantalla:
     - LED Verde                                 -> Pin Digital D4
-    - LED Amarillo                              -> Pin Digital D6 (Corregido mapeo físico)
-    - LED Rojo                                  -> Pin Digital D5 (Corregido mapeo físico)
+    - LED Amarillo                              -> Pin Digital D6 (Mapeo físico verificado)
+    - LED Rojo                                  -> Pin Digital D5 (Mapeo físico verificado)
     - Ventilador (Control PWM)                  -> Pin Digital D9 (~PWM)
     - Pantalla LCD 16x2 I2C                     -> Pines A4 (SDA) y A5 (SCL) [Dirección 0x27 o 0x3F]
   
+  Lógica de Control Automático de Temperatura Ideal (ML Regional):
+    - 🟢 LED Verde: Temperatura ideal alcanzada (dentro de ±1.0°C).
+      -> Ventilador APAGADO (PWM 0) para conservar la temperatura ideal.
+    - 🟡 LED Amarillo: En camino / aproximándose a la ideal (entre 1.0°C y 3.5°C).
+      -> Ventilador al 60% (~PWM 153) para estabilización suave.
+    - 🔴 LED Rojo: Falta mucho para llegar a la temperatura ideal (> 3.5°C).
+      -> Ventilador al 100% (PWM 255) a máxima potencia.
+    - Reactivación: Si la temperatura se desvía nuevamente, el ventilador y los
+      LEDs se reactivan automáticamente para mantenerla en el punto óptimo.
+  
   Comandos Seriales Recibidos (9600 baudios):
-    'V'           : Encender LED Verde
-    'A'           : Encender LED Amarillo
-    'R'           : Encender LED Rojo
-    '1'           : Ventilador al 60% (~PWM 153)
-    '2'           : Ventilador al 100% (PWM 255)
+    'T:XX.X'      : Fijar Temperatura Ideal predicha por el ML (ej. 'T:38.5')
+    'V'           : Encender LED Verde manualmente
+    'A'           : Encender LED Amarillo manualmente
+    'R'           : Encender LED Rojo manualmente
+    '1'           : Ventilador al 60% (~PWM 153) manual
+    '2'           : Ventilador al 100% (PWM 255) manual
     '0'           : Apagar todo (LEDs, Ventilador a 0, Pantalla en reposo)
     'D:Tu Frase'  : Mostrar frase personalizada en la Pantalla LCD (hasta 32 caracteres)
-    'I'           : Iniciar transmisión periódica de telemetría (cada 2s)
-    'P'           : Pausar transmisión de telemetría
+    'I'           : Iniciar transmisión de telemetría y control térmico automático
+    'P'           : Pausar transmisión de telemetría y apagar actuadores
   ==============================================================================
 */
 
@@ -56,9 +67,20 @@ bool modoAnalisisActivo = false;
 unsigned long ultimaLecturaMs = 0;
 const unsigned long INTERVALO_ENVIO_MS = 2000;
 
+// Parámetros de Control Térmico Automático (Consigna ML)
+float tempIdeal = 38.0;               // Temperatura ideal objetivo por defecto (°C)
+const float TOLERANCIA_IDEAL = 1.0;   // ±1.0 °C: Ideal alcanzada (Verde, Fan OFF)
+const float UMBRAL_CERCA = 3.5;       // Hasta 3.5 °C de distancia: En camino (Amarillo, Fan 60%)
+                                      // Más de 3.5 °C: Falta mucho (Rojo, Fan 100%)
+
+// Variables de diagnóstico en tiempo real
+int pwmVentiladorActual = 0;
+char estadoLedActual = '0';           // 'V', 'A', 'R', '0'
+
 // Declaración previa de funciones
 void mostrarEnLCD(String texto);
 void apagarTodo();
+void regularTemperaturaYActuadores(float tempActual);
 
 void setup() {
   Serial.begin(9600);
@@ -96,6 +118,28 @@ void loop() {
     char comando = Serial.read();
 
     switch (comando) {
+      // --- Consigna de Temperatura Ideal desde Modelo ML de Streamlit ---
+      case 'T':
+      case 't': {
+        delay(25); // Espera breve para asegurar la llegada completa del valor
+        String valorStr = Serial.readStringUntil('\n');
+        valorStr.trim();
+        if (valorStr.startsWith(":")) {
+          valorStr = valorStr.substring(1);
+          valorStr.trim();
+        }
+        float nuevaTemp = valorStr.toFloat();
+        if (nuevaTemp >= 15.0 && nuevaTemp <= 60.0) {
+          tempIdeal = nuevaTemp;
+          Serial.print("ACK: Temp Ideal fijada a ");
+          Serial.print(tempIdeal, 1);
+          Serial.println(" C");
+        } else {
+          Serial.println("ERR: Temp ideal fuera de rango (15-60 C)");
+        }
+        break;
+      }
+
       // --- Prueba de Pantalla LCD ---
       case 'D':
       case 'd': {
@@ -112,33 +156,44 @@ void loop() {
         break;
       }
 
-      // --- Prueba de Indicadores Luminosos ---
+      // --- Control Manual de Indicadores Luminosos ---
       case 'V':
       case 'v':
         digitalWrite(PIN_LED_VERDE, HIGH);
+        digitalWrite(PIN_LED_AMARILLO, LOW);
+        digitalWrite(PIN_LED_ROJO, LOW);
+        estadoLedActual = 'V';
         Serial.println("ACK: LED Verde Encendido");
         break;
 
       case 'A':
       case 'a':
+        digitalWrite(PIN_LED_VERDE, LOW);
         digitalWrite(PIN_LED_AMARILLO, HIGH);
+        digitalWrite(PIN_LED_ROJO, LOW);
+        estadoLedActual = 'A';
         Serial.println("ACK: LED Amarillo Encendido");
         break;
 
       case 'R':
       case 'r':
+        digitalWrite(PIN_LED_VERDE, LOW);
+        digitalWrite(PIN_LED_AMARILLO, LOW);
         digitalWrite(PIN_LED_ROJO, HIGH);
+        estadoLedActual = 'R';
         Serial.println("ACK: LED Rojo Encendido");
         break;
 
-      // --- Control de Ventilación ---
+      // --- Control Manual de Ventilación ---
       case '1':
         analogWrite(PIN_VENTILADOR, 153); // ~60% PWM
+        pwmVentiladorActual = 153;
         Serial.println("ACK: Ventilador 60%");
         break;
 
       case '2':
         analogWrite(PIN_VENTILADOR, 255); // 100% PWM
+        pwmVentiladorActual = 255;
         Serial.println("ACK: Ventilador 100%");
         break;
 
@@ -147,7 +202,7 @@ void loop() {
         Serial.println("ACK: Todo Apagado");
         break;
 
-      // --- Telemetría y Análisis ---
+      // --- Telemetría y Análisis Térmico Automático ---
       case 'I':
       case 'i':
         modoAnalisisActivo = true;
@@ -158,10 +213,9 @@ void loop() {
       case 'P':
       case 'p':
         modoAnalisisActivo = false;
+        apagarTodo();
         Serial.println("ACK: Analisis Pausado");
-        lcd.clear();
-        lcd.setCursor(0, 0);
-        lcd.print("ANALISIS PAUSADO");
+        mostrarEnLCD("ANALISIS PAUSADO");
         break;
 
       default:
@@ -171,7 +225,7 @@ void loop() {
   }
 
   // ---------------------------------------------------------------------------
-  // 2. TRANSMISIÓN PERIÓDICA DE TELEMETRÍA (Solo si 'I' está activo)
+  // 2. TRANSMISIÓN DE TELEMETRÍA Y REGULACIÓN TÉRMICA EN LAZO CERRADO
   // ---------------------------------------------------------------------------
   if (modoAnalisisActivo) {
     unsigned long tiempoActual = millis();
@@ -179,11 +233,11 @@ void loop() {
     if (tiempoActual - ultimaLecturaMs >= INTERVALO_ENVIO_MS) {
       ultimaLecturaMs = tiempoActual;
 
-      // Lectura de sensor DHT22
+      // Lectura de sensor DHT22 (Ambiente)
       float humAmbiente = dht.readHumidity();
       float tempAmbiente = dht.readTemperature();
 
-      // Lectura de sensor DS18B20
+      // Lectura de sensor DS18B20 (Grano en masa)
       sensorGrano.requestTemperatures();
       float tempGrano = sensorGrano.getTempCByIndex(0);
 
@@ -192,27 +246,79 @@ void loop() {
       bool dsValido = (tempGrano != DEVICE_DISCONNECTED_C) && (tempGrano > -40.0) && (tempGrano < 100.0);
 
       if (dhtValido && dsValido) {
-        // Formato CSV requerido: TempAmbiente,Humedad,TempGrano
+        // 1. Envío de Telemetría Serial CSV (TempAmbiente,Humedad,TempGrano)
         Serial.print(tempAmbiente, 1);
         Serial.print(",");
         Serial.print(humAmbiente, 1);
         Serial.print(",");
         Serial.println(tempGrano, 1);
 
-        // Actualizar LCD en modo análisis
+        // 2. Control Automático: Regular ventilador y LEDs hacia la tempIdeal
+        float tempControl = dsValido ? tempGrano : tempAmbiente;
+        regularTemperaturaYActuadores(tempControl);
+
+        // 3. Actualización de Pantalla LCD 16x2
+        // Fila 0: Temperatura Ambiente y Humedad (ej. "A:28.5C H:65%   ")
         lcd.setCursor(0, 0);
         lcd.print("A:");
         lcd.print(tempAmbiente, 1);
         lcd.print("C H:");
         lcd.print((int)humAmbiente);
-        lcd.print("%  ");
-        
+        lcd.print("%   ");
+
+        // Fila 1: Temperatura del Grano y Temperatura Ideal ML (ej. "G:32.1C Id:38.0C")
         lcd.setCursor(0, 1);
-        lcd.print("Grano:");
+        lcd.print("G:");
         lcd.print(tempGrano, 1);
-        lcd.print("C    ");
+        lcd.print("C Id:");
+        lcd.print(tempIdeal, 1);
+        lcd.print("C");
       }
     }
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Función de Control Térmico en Lazo Cerrado (Ventilador + Semáforo LED)
+// -----------------------------------------------------------------------------
+void regularTemperaturaYActuadores(float tempActual) {
+  float diferencia = abs(tempActual - tempIdeal);
+
+  if (diferencia <= TOLERANCIA_IDEAL) {
+    // --- ESTADO 1: TEMPERATURA IDEAL ALCANZADA ---
+    // Encender únicamente LED Verde
+    digitalWrite(PIN_LED_VERDE, HIGH);
+    digitalWrite(PIN_LED_AMARILLO, LOW);
+    digitalWrite(PIN_LED_ROJO, LOW);
+
+    // Apagar ventilador para preservar la temperatura alcanzada
+    analogWrite(PIN_VENTILADOR, 0);
+    pwmVentiladorActual = 0;
+    estadoLedActual = 'V';
+  } 
+  else if (diferencia <= UMBRAL_CERCA) {
+    // --- ESTADO 2: EN CAMINO / CERCA DE LA TEMPERATURA IDEAL ---
+    // Encender únicamente LED Amarillo
+    digitalWrite(PIN_LED_VERDE, LOW);
+    digitalWrite(PIN_LED_AMARILLO, HIGH);
+    digitalWrite(PIN_LED_ROJO, LOW);
+
+    // Ventilador a velocidad moderada (~60%) para aproximación controlada
+    analogWrite(PIN_VENTILADOR, 153);
+    pwmVentiladorActual = 153;
+    estadoLedActual = 'A';
+  } 
+  else {
+    // --- ESTADO 3: FALTA MUCHO PARA LLEGAR A LA TEMPERATURA IDEAL ---
+    // Encender únicamente LED Rojo
+    digitalWrite(PIN_LED_VERDE, LOW);
+    digitalWrite(PIN_LED_AMARILLO, LOW);
+    digitalWrite(PIN_LED_ROJO, HIGH);
+
+    // Ventilador al 100% de potencia para acelerar la estabilización
+    analogWrite(PIN_VENTILADOR, 255);
+    pwmVentiladorActual = 255;
+    estadoLedActual = 'R';
   }
 }
 
@@ -236,13 +342,16 @@ void mostrarEnLCD(String texto) {
   }
 }
 
-// Apagar actuadores
+// Apagar todos los actuadores y restablecer estado seguro
 void apagarTodo() {
   digitalWrite(PIN_LED_VERDE, LOW);
   digitalWrite(PIN_LED_AMARILLO, LOW);
   digitalWrite(PIN_LED_ROJO, LOW);
   analogWrite(PIN_VENTILADOR, 0);
+  pwmVentiladorActual = 0;
+  estadoLedActual = '0';
   lcd.clear();
   lcd.setCursor(0, 0);
   lcd.print("STANDBY / LISTO");
 }
+
