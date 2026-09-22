@@ -40,11 +40,11 @@ def test_predict_ideal_temperature_san_martin_vs_cajamarca():
 
 
 def test_evaluate_thermal_state_green_target_reached():
-    """Valida el encendido de LED Verde y apagado de ventilador cuando se alcanza la temperatura ideal."""
+    """Valida el encendido de LED Verde y apagado de ventilador cuando se alcanza la temperatura ideal (±0.8°C)."""
     ideal = 23.0  # Escala prototipo para demostración en vivo
     
-    # Exactamente en la ideal o dentro de la tolerancia de ±1.0°C (22.0°C a 24.0°C)
-    for temp in [23.0, 23.5, 22.2, 24.0, 22.0]:
+    # Exactamente en la ideal o dentro de la tolerancia de ±0.8°C (22.2°C a 23.8°C)
+    for temp in [23.0, 23.5, 22.3, 23.8, 22.2]:
         state, led, pwm, label = evaluate_thermal_state(measured_temp=temp, ideal_temp=ideal)
         assert state == "IDEAL_ALCANZADA"
         assert led == "VERDE"
@@ -53,11 +53,11 @@ def test_evaluate_thermal_state_green_target_reached():
 
 
 def test_evaluate_thermal_state_yellow_on_the_way():
-    """Valida LED Amarillo y ventilador a 60% (PWM 153) cuando está en camino (1.0°C a 3.5°C)."""
+    """Valida LED Amarillo y ventilador a 60% (PWM 153) cuando está en camino (0.8°C a 2.2°C)."""
     ideal = 23.0
     
-    # Temperaturas a distancia intermedia (24.1°C a 26.5°C o 19.5°C a 21.9°C)
-    for temp in [24.5, 26.0, 21.5, 20.0]:
+    # Temperaturas a distancia intermedia (23.9°C a 25.2°C o 20.8°C a 22.1°C)
+    for temp in [23.9, 24.5, 25.2, 22.1, 21.0]:
         state, led, pwm, label = evaluate_thermal_state(measured_temp=temp, ideal_temp=ideal)
         assert state == "EN_CAMINO"
         assert led == "AMARILLO"
@@ -66,11 +66,11 @@ def test_evaluate_thermal_state_yellow_on_the_way():
 
 
 def test_evaluate_thermal_state_red_far_from_target():
-    """Valida LED Rojo y ventilador a 100% (PWM 255) cuando falta mucho (> 3.5°C)."""
+    """Valida LED Rojo y ventilador a 100% (PWM 255) cuando falta mucho o hay desviación (> 2.2°C)."""
     ideal = 23.0
     
-    # Temperaturas lejanas (> 26.5°C o < 19.5°C)
-    for temp in [28.0, 32.0, 18.0, 15.0]:
+    # Temperaturas lejanas (> 25.2°C o < 20.8°C)
+    for temp in [25.5, 27.0, 30.0, 20.0, 15.0]:
         state, led, pwm, label = evaluate_thermal_state(measured_temp=temp, ideal_temp=ideal)
         assert state == "FALTA_MUCHO"
         assert led == "ROJO"

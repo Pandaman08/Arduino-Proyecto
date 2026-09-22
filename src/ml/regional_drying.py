@@ -69,11 +69,11 @@ def evaluate_thermal_state(
         (estado_codigo, color_led, pwm_ventilador, etiqueta_ventilador)
         
     Valores posibles de color_led:
-        - 'VERDE': Ideal alcanzada (|error| <= 1.0°C), Fan 0
-        - 'AMARILLO': En camino (1.0°C < |error| <= 3.5°C), Fan 153 (60%)
-        - 'ROJO': Falta mucho (|error| > 3.5°C), Fan 255 (100%)
+        - 'VERDE': Ideal alcanzada (|error| <= 0.8°C), Fan 0
+        - 'AMARILLO': En camino (0.8°C < |error| <= 2.2°C), Fan 153 (60%)
+        - 'ROJO': Falta mucho (|error| > 2.2°C), Fan 255 (100%)
     """
-    error = abs(measured_temp - ideal_temp)
+    error = round(abs(measured_temp - ideal_temp), 2)
 
     if error <= TOLERANCIA_IDEAL_TEMP:
         return (

@@ -13,18 +13,18 @@
     - Ventilador (Control PWM)                  -> Pin Digital D9 (~PWM)
     - Pantalla LCD 16x2 I2C                     -> Pines A4 (SDA) y A5 (SCL) [Dirección 0x27 o 0x3F]
   
-  Lógica de Control Automático de Temperatura Ideal (ML Regional):
-    - 🟢 LED Verde: Temperatura ideal alcanzada (dentro de ±1.0°C).
+  Lógica de Control Automático de Temperatura Ideal (Demostración Rápida en Vivo):
+    - 🟢 LED Verde: Temperatura ideal alcanzada (dentro de ±0.8°C).
       -> Ventilador APAGADO (PWM 0) para conservar la temperatura ideal.
-    - 🟡 LED Amarillo: En camino / aproximándose a la ideal (entre 1.0°C y 3.5°C).
+    - 🟡 LED Amarillo: En camino / aproximándose a la ideal (entre 0.8°C y 2.2°C).
       -> Ventilador al 60% (~PWM 153) para estabilización suave.
-    - 🔴 LED Rojo: Falta mucho para llegar a la temperatura ideal (> 3.5°C).
+    - 🔴 LED Rojo: Falta mucho / Alerta de desviación (> 2.2°C).
       -> Ventilador al 100% (PWM 255) a máxima potencia.
     - Reactivación: Si la temperatura se desvía nuevamente, el ventilador y los
       LEDs se reactivan automáticamente para mantenerla en el punto óptimo.
   
   Comandos Seriales Recibidos (9600 baudios):
-    'T:XX.X'      : Fijar Temperatura Ideal predicha por el ML (ej. 'T:38.5')
+    'T:XX.X'      : Fijar Temperatura Ideal predicha por el ML (ej. 'T:23.0')
     'V'           : Encender LED Verde manualmente
     'A'           : Encender LED Amarillo manualmente
     'R'           : Encender LED Rojo manualmente
@@ -63,15 +63,19 @@ OneWire oneWire(PIN_ONEWIRE);
 DallasTemperature sensorGrano(&oneWire);
 
 // Variables de estado y temporización
-bool modoAnalisisActivo = false;
+bool modoAnalisisActivo = true;        // Activo por defecto para respuesta inmediata en demostración
 unsigned long ultimaLecturaMs = 0;
 const unsigned long INTERVALO_ENVIO_MS = 2000;
 
 // Parámetros de Control Térmico Automático (Consigna ML Prototipo -15°C para Demo en Vivo)
+// Umbrales calibrados para demostración en vivo inmediata:
+// - Reposo (~22.5°C - 23.5°C): 🟢 LED Verde (±0.8°C, Fan OFF)
+// - Tocar sensor con dedos (24°C - 25°C): 🟡 LED Amarillo (0.8°C a 2.2°C, Fan 60%)
+// - Sujetar sensor firmemente (> 25.2°C): 🔴 LED Rojo (> 2.2°C, Fan 100%)
 float tempIdeal = 23.0;               // Temperatura ideal prototipo calibrada para demostración en vivo (°C)
-const float TOLERANCIA_IDEAL = 1.0;   // ±1.0 °C: Ideal alcanzada (Verde, Fan OFF)
-const float UMBRAL_CERCA = 3.5;       // Hasta 3.5 °C de distancia: En camino (Amarillo, Fan 60%)
-                                      // Más de 3.5 °C: Falta mucho (Rojo, Fan 100%)
+const float TOLERANCIA_IDEAL = 0.8;   // ±0.8 °C: Ideal alcanzada (Verde, Fan OFF)
+const float UMBRAL_CERCA = 2.2;       // Hasta 2.2 °C de distancia: En camino (Amarillo, Fan 60%)
+                                      // Más de 2.2 °C: Falta mucho / Desviación (Rojo, Fan 100%)
 
 // Variables de diagnóstico en tiempo real
 int pwmVentiladorActual = 0;
@@ -96,15 +100,16 @@ void setup() {
   lcd.backlight();
   lcd.clear();
   lcd.setCursor(0, 0);
-  lcd.print("SECADO CAFE IA");
+  lcd.print("SECADO CAFE IA  ");
   lcd.setCursor(0, 1);
-  lcd.print("SISTEMA LISTO");
+  lcd.print("Id:23.0C LISTO  ");
 
   apagarTodo();
 
   // Inicializar sensores
   dht.begin();
   sensorGrano.begin();
+  sensorGrano.setResolution(10); // Resolución 10 bits (0.25°C): muestreo rápido 187ms para respuesta ágil
 
   delay(1000);
   Serial.println("SISTEMA_LISTO");
@@ -134,6 +139,32 @@ void loop() {
           Serial.print("ACK: Temp Ideal fijada a ");
           Serial.print(tempIdeal, 1);
           Serial.println(" C");
+
+          // Actualización visual inmediata en la pantalla LCD
+          if (modoAnalisisActivo) {
+            sensorGrano.requestTemperatures();
+            float tg = sensorGrano.getTempCByIndex(0);
+            if (tg == DEVICE_DISCONNECTED_C || tg < -40.0 || tg > 100.0) {
+              tg = dht.readTemperature();
+            }
+            if (!isnan(tg)) {
+              regularTemperaturaYActuadores(tg);
+              lcd.setCursor(0, 1);
+              lcd.print("G:");
+              lcd.print(tg, 1);
+              lcd.print("C Id:");
+              lcd.print(tempIdeal, 1);
+              lcd.print("C");
+            }
+          } else {
+            lcd.clear();
+            lcd.setCursor(0, 0);
+            lcd.print("CONSIGNA IDEAL: ");
+            lcd.setCursor(0, 1);
+            lcd.print("T.Ideal: ");
+            lcd.print(tempIdeal, 1);
+            lcd.print("C ");
+          }
         } else {
           Serial.println("ERR: Temp ideal fuera de rango (10-50 C)");
         }
@@ -352,6 +383,10 @@ void apagarTodo() {
   estadoLedActual = '0';
   lcd.clear();
   lcd.setCursor(0, 0);
-  lcd.print("STANDBY / LISTO");
+  lcd.print("STANDBY LISTO   ");
+  lcd.setCursor(0, 1);
+  lcd.print("T.Ideal: ");
+  lcd.print(tempIdeal, 1);
+  lcd.print("C ");
 }
 

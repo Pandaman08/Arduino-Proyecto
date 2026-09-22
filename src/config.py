@@ -59,9 +59,9 @@ HISTORY_MAX_ROWS: int = 60
 # Calibrado -15°C respecto a la escala agroindustrial real (38°C -> 23°C)
 # para permitir demostración práctica inmediata a temperatura ambiente de aula/laboratorio
 DEFAULT_IDEAL_TEMP: float = 23.0
-TOLERANCIA_IDEAL_TEMP: float = 1.0  # ±1.0°C: Verde, Fan OFF
-UMBRAL_CERCA_TEMP: float = 3.5      # <= 3.5°C: Amarillo, Fan 60%
-                                   # > 3.5°C: Rojo, Fan 100%
+TOLERANCIA_IDEAL_TEMP: float = 0.8  # ±0.8°C: Verde, Fan OFF
+UMBRAL_CERCA_TEMP: float = 2.2      # <= 2.2°C: Amarillo, Fan 60%
+                                   # > 2.2°C: Rojo, Fan 100%
 
 # ==============================================================================
 # PERFILES CLIMÁTICOS DE REGIONES PRODUCTORAS DE PERÚ (CALIBRADOS PARA PROTOTIPO)

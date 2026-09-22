@@ -582,6 +582,9 @@ with tab_analisis:
     regiones_lista = list(PERU_REGIONS_DATA.keys())
     idx_def = regiones_lista.index(st.session_state.region_seleccionada) if st.session_state.region_seleccionada in regiones_lista else 0
 
+    if 'region_anterior' not in st.session_state:
+        st.session_state.region_anterior = st.session_state.region_seleccionada
+
     col_reg1, col_reg2 = st.columns([1.5, 2.5])
     with col_reg1:
         region_sel = st.selectbox(
@@ -590,7 +593,6 @@ with tab_analisis:
             index=idx_def,
             help="Adapta la consigna según las condiciones psicrométricas y precipitaciones típicas de cada zona productora del Perú."
         )
-        st.session_state.region_seleccionada = region_sel
 
     perfil = PERU_REGIONS_DATA[region_sel]
     
@@ -598,6 +600,14 @@ with tab_analisis:
     hum_ref = st.session_state.ultima_hum_amb if st.session_state.ultima_hum_amb is not None else perfil["humedad_tipica"]
     temp_ref = st.session_state.ultima_temp_amb if st.session_state.ultima_temp_amb is not None else 23.0
     temp_ideal_predicha = predict_ideal_temperature(region_sel, hum_ref, temp_ref)
+
+    # Si el usuario selecciona otra región, actualizar de inmediato la consigna activa y enviar a Arduino
+    if region_sel != st.session_state.region_anterior:
+        st.session_state.region_anterior = region_sel
+        st.session_state.region_seleccionada = region_sel
+        st.session_state.temp_ideal_consigna = temp_ideal_predicha
+        if esta_conectado:
+            enviar_comando(f"T:{temp_ideal_predicha:.1f}", f"Actualizar región a {region_sel}")
 
     with col_reg2:
         st.info(
@@ -612,8 +622,11 @@ with tab_analisis:
         st.markdown(f"""
         <div class="prediction-card" style="border-color: #f59e0b; background: linear-gradient(135deg, #451a03 0%, #1e1b4b 100%);">
             <div class="prediction-title" style="color: #fde68a;">🎯 Temp. Ideal Prototipo (Demo)</div>
-            <div class="prediction-value" style="color: #fbbf24;">{temp_ideal_predicha:.1f}</div>
+            <div class="prediction-value" style="color: #fbbf24;">{st.session_state.temp_ideal_consigna:.1f}</div>
             <div class="prediction-unit" style="color: #fde68a;">°C (Consigna Activa)</div>
+            <div style="font-size: 0.82rem; color: #fef08a; margin-top: 6px; font-weight: 600;">
+                📍 {perfil['departamento']} (ML: {temp_ideal_predicha:.1f}°C)
+            </div>
         </div>
         """, unsafe_allow_html=True)
     with col_t2:
@@ -622,9 +635,8 @@ with tab_analisis:
         with col_c_sync:
             st.write("")
             if st.button("📤 Sincronizar con Arduino", use_container_width=True, disabled=not esta_conectado):
-                if enviar_comando(f"T:{temp_ideal_predicha:.1f}", f"Temp Ideal {temp_ideal_predicha:.1f}°C"):
-                    st.session_state.temp_ideal_consigna = temp_ideal_predicha
-                    st.toast(f"Consigna T:{temp_ideal_predicha:.1f}°C transmitida al Arduino", icon="🎯")
+                if enviar_comando(f"T:{st.session_state.temp_ideal_consigna:.1f}", f"Temp Ideal {st.session_state.temp_ideal_consigna:.1f}°C"):
+                    st.toast(f"Consigna T:{st.session_state.temp_ideal_consigna:.1f}°C transmitida al Arduino y LCD", icon="🎯")
         with col_c_man:
             temp_manual = st.number_input(
                 "Ajustar Consigna de Secado (°C):",
@@ -681,10 +693,10 @@ with tab_analisis:
                     grano_prev = st.session_state.get('sim_grano_actual', ideal_t + 4.0)
                     error_sim = grano_prev - ideal_t
 
-                    if abs(error_sim) > 3.5:
+                    if abs(error_sim) > 2.2:
                         # Lejos: Ventilador al 100% reduce la temperatura rápidamente
                         grano_prev -= 0.8
-                    elif abs(error_sim) > 1.0:
+                    elif abs(error_sim) > 0.8:
                         # En camino: Ventilador al 60% reduce suavemente
                         grano_prev -= 0.4
                     else:
@@ -778,17 +790,17 @@ with tab_analisis:
                 if color_led == "VERDE":
                     css_banner = "semaforo-verde"
                     icono_banner = "🟢"
-                    texto_banner = "TEMPERATURA IDEAL ALCANZADA (Diferencia ≤ ±1.0°C)"
+                    texto_banner = "TEMPERATURA IDEAL ALCANZADA (Diferencia ≤ ±0.8°C)"
                     accion_banner = "Ventilador APAGADO (0%) — Preservando temperatura ideal de secado"
                 elif color_led == "AMARILLO":
                     css_banner = "semaforo-amarillo"
                     icono_banner = "🟡"
-                    texto_banner = "EN CAMINO A LA TEMPERATURA IDEAL (Diferencia ≤ 3.5°C)"
+                    texto_banner = "EN CAMINO A LA TEMPERATURA IDEAL (Diferencia ≤ 2.2°C)"
                     accion_banner = "Ventilador al 60% (PWM 153) — Estabilización suave en curso"
                 else:
                     css_banner = "semaforo-rojo"
                     icono_banner = "🔴"
-                    texto_banner = "FALTA MUCHO PARA LA TEMPERATURA IDEAL (Diferencia > 3.5°C)"
+                    texto_banner = "FALTA MUCHO PARA LA TEMPERATURA IDEAL (Diferencia > 2.2°C)"
                     accion_banner = "Ventilador al 100% (PWM 255) — Máxima convección para forzar ajuste"
 
                 with semaforo_area:
@@ -933,7 +945,7 @@ with tab_estado:
         st.markdown(f"""
         <div class="diag-card">
             <div class="diag-title">🟢 LED Verde <span class="diag-pin">Pin D4</span></div>
-            <p><strong>Función en Lazo:</strong> Meta Térmica Alcanzada (±1.0°C)</p>
+            <p><strong>Función en Lazo:</strong> Meta Térmica Alcanzada (±0.8°C)</p>
             <p><strong>Estado:</strong> {'<span class="diag-status-ok">ENCENDIDO</span>' if st.session_state.estado_led_verde else '<span class="diag-status-off">Apagado</span>'}</p>
             <p class="diag-muted">Se activa cuando el grano llega a la temperatura ideal calculada por el ML. Apaga el ventilador.</p>
         </div>
@@ -943,7 +955,7 @@ with tab_estado:
         st.markdown(f"""
         <div class="diag-card">
             <div class="diag-title">🟡 LED Amarillo <span class="diag-pin">Pin D6</span></div>
-            <p><strong>Función en Lazo:</strong> En Camino a la Ideal (1.0°C a 3.5°C)</p>
+            <p><strong>Función en Lazo:</strong> En Camino a la Ideal (0.8°C a 2.2°C)</p>
             <p><strong>Estado:</strong> {'<span class="diag-status-warn">ENCENDIDO</span>' if st.session_state.estado_led_amarillo else '<span class="diag-status-off">Apagado</span>'}</p>
             <p class="diag-muted">Aproximación progresiva. El ventilador modula al 60% PWM (153) para estabilización suave.</p>
         </div>
@@ -953,7 +965,7 @@ with tab_estado:
         st.markdown(f"""
         <div class="diag-card">
             <div class="diag-title">🔴 LED Rojo <span class="diag-pin">Pin D5</span></div>
-            <p><strong>Función en Lazo:</strong> Falta Mucho / Desviación (>3.5°C)</p>
+            <p><strong>Función en Lazo:</strong> Falta Mucho / Desviación (>2.2°C)</p>
             <p><strong>Estado:</strong> {'<span class="diag-status-err">ENCENDIDO</span>' if st.session_state.estado_led_rojo else '<span class="diag-status-off">Apagado</span>'}</p>
             <p class="diag-muted">Diferencia térmica amplia. El ventilador opera al 100% PWM (255) a máxima potencia.</p>
         </div>
