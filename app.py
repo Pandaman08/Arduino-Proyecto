@@ -1,1035 +1,438 @@
-"""
-Monitor IoT - Secado de Granos con IA (Café y Cacao)
-Gateway Bidireccional en Streamlit con Control de Actuadores,
-Diagnóstico de Componentes y Predicción ML.
+"""Plataforma Streamlit de monitoreo y experimentación IoT.
+
+Streamlit no abre el puerto serial: el puente independiente se encarga de
+Arduino y esta interfaz consume MQTT o ejecuta una demostración explícita.
 """
 
-import os
-import time
-import datetime
-from pathlib import Path
+import uuid
+from datetime import datetime, timezone
+from typing import Any, Optional
+
 import pandas as pd
-import numpy as np
 import streamlit as st
-import joblib
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import r2_score, mean_absolute_error
-import serial
-import serial.tools.list_ports
 
-# ==============================================================================
-# 1. CONFIGURACIÓN DE PÁGINA Y RUTAS
-# ==============================================================================
-st.set_page_config(
-    page_title="Monitor IoT - Secado de Granos con IA",
-    page_icon="☕",
-    layout="wide",
-    initial_sidebar_state="expanded"
+from src.analysis import calculate_experiment_indicators, compare_experiments, statistical_tests
+from src.analysis.reports import comparison_pdf, dataframe_csv, dataframe_excel, line_chart_png
+from src.config import CRITICAL_GRAIN_OVERHEAT_THRESHOLD, MODEL_PATH
+from src.hardware.serial_manager import generate_simulated_telemetry
+from src.ml.model_manager import load_or_train_predictor
+from src.persistence import (
+    ExperimentManager, ExperimentPhase, ExperimentStatus, GrainType,
+    HistoryRepository, MeasurementOrigin, initialize_database,
 )
+from src.mqtt.streamlit_adapter import create_optional_streamlit_subscriber
+from src.services.monitoring import TelemetryProcessor
+from src.ui import CUSTOM_CSS, render_footer, render_header
 
-BASE_DIR = Path(__file__).resolve().parent
-DATASET_PATH = BASE_DIR / "data" / "dataset_secado_cafe.csv"
-if not DATASET_PATH.exists():
-    DATASET_PATH = BASE_DIR / "dataset_secado_cafe.csv"
 
-MODEL_PATH = BASE_DIR / "models" / "modelo_secado.pkl"
-if not MODEL_PATH.parent.exists():
-    MODEL_PATH = BASE_DIR / "modelo_secado.pkl"
+st.set_page_config(page_title="Secado IoT | Café y Cacao", page_icon="☕", layout="wide")
+st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
-# Integración del modelo regional de Perú y control térmico
-try:
-    from src.config import (
-        PERU_REGIONS_DATA,
-        DEFAULT_IDEAL_TEMP,
-        TOLERANCIA_IDEAL_TEMP,
-        UMBRAL_CERCA_TEMP
-    )
-    from src.ml.regional_drying import (
-        predict_ideal_temperature,
-        evaluate_thermal_state
-    )
-except ImportError:
-    import sys
-    sys.path.insert(0, str(BASE_DIR))
-    from src.config import (
-        PERU_REGIONS_DATA,
-        DEFAULT_IDEAL_TEMP,
-        TOLERANCIA_IDEAL_TEMP,
-        UMBRAL_CERCA_TEMP
-    )
-    from src.ml.regional_drying import (
-        predict_ideal_temperature,
-        evaluate_thermal_state
-    )
 
-# Estilos CSS profesionales para panel IoT
-st.markdown("""
-<style>
-    .main-header {
-        background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
-        padding: 1.4rem 2rem;
-        border-radius: 12px;
-        color: white;
-        margin-bottom: 1.2rem;
-        box-shadow: 0 4px 15px rgba(0,0,0,0.1);
-    }
-    .main-header h1 { color: #ffffff !important; font-size: 2.1rem; font-weight: 700; margin: 0; }
-    .main-header p { color: #e0e7ff; font-size: 0.95rem; margin-top: 0.3rem; margin-bottom: 0; }
-    
-    /* Tarjeta destacada de IA */
-    .prediction-card {
-        background: linear-gradient(135deg, #0d3b66 0%, #001e3d 100%);
-        border: 2px solid #00b4d8;
-        border-radius: 12px;
-        padding: 1.2rem;
-        text-align: center;
-        color: white;
-        box-shadow: 0 6px 20px rgba(0, 180, 216, 0.25);
-    }
-    .prediction-title { font-size: 0.85rem; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: #caf0f8; }
-    .prediction-value { font-size: 2.8rem; font-weight: 800; color: #90e0ef; margin: 0.2rem 0; line-height: 1.1; }
-    .prediction-unit { font-size: 1rem; color: #caf0f8; font-weight: 500; }
-    .prediction-badge { display: inline-block; margin-top: 0.5rem; padding: 0.3rem 0.8rem; border-radius: 20px; font-size: 0.8rem; font-weight: 600; }
-    .badge-normal { background-color: rgba(0, 180, 216, 0.2); color: #caf0f8; }
-    .badge-final { background-color: rgba(46, 204, 113, 0.25); color: #a3e635; }
-    .badge-danger { background-color: rgba(239, 68, 68, 0.3); color: #fca5a5; border: 1px solid #ef4444; }
-    
-    /* Semáforo Térmico de Secado (Lazo Cerrado) */
-    .semaforo-banner {
-        border-radius: 12px;
-        padding: 1rem 1.4rem;
-        margin: 0.9rem 0;
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        box-shadow: 0 4px 15px rgba(0,0,0,0.15);
-        font-family: inherit;
-    }
-    .semaforo-verde {
-        background: linear-gradient(135deg, rgba(34, 197, 94, 0.18) 0%, rgba(22, 101, 52, 0.35) 100%);
-        border: 2px solid #22c55e;
-        color: #bbf7d0;
-    }
-    .semaforo-amarillo {
-        background: linear-gradient(135deg, rgba(234, 179, 8, 0.18) 0%, rgba(133, 77, 14, 0.35) 100%);
-        border: 2px solid #eab308;
-        color: #fef08a;
-    }
-    .semaforo-rojo {
-        background: linear-gradient(135deg, rgba(239, 68, 68, 0.2) 0%, rgba(127, 29, 29, 0.38) 100%);
-        border: 2px solid #ef4444;
-        color: #fecaca;
-    }
-    .badge-semaforo-pill {
-        padding: 6px 14px;
-        border-radius: 20px;
-        font-weight: 700;
-        font-size: 0.85rem;
-        letter-spacing: 0.5px;
-        background: rgba(0, 0, 0, 0.35);
-        border: 1px solid rgba(255, 255, 255, 0.2);
-    }
-    
-    /* Tarjetas de Diagnóstico Adaptativas (Modo Oscuro y Claro) */
-    .diag-card {
-        background-color: var(--secondary-background-color, #1e293b);
-        color: var(--text-color, #e2e8f0);
-        border: 1px solid rgba(148, 163, 184, 0.25);
-        border-radius: 12px;
-        padding: 1.15rem;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-        margin-bottom: 1rem;
-        transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
-    }
-    .diag-card:hover {
-        border-color: #00b4d8;
-        transform: translateY(-2px);
-        box-shadow: 0 6px 16px rgba(0, 180, 216, 0.2);
-    }
-    .diag-title {
-        font-size: 1.05rem;
-        font-weight: 700;
-        color: var(--text-color, #f8fafc);
-        margin-bottom: 0.5rem;
-        display: flex;
-        align-items: center;
-        gap: 8px;
-    }
-    .diag-pin {
-        font-size: 0.75rem;
-        background: rgba(148, 163, 184, 0.2);
-        color: var(--text-color, #94a3b8);
-        padding: 2px 8px;
-        border-radius: 4px;
-        font-weight: 600;
-        border: 1px solid rgba(148, 163, 184, 0.25);
-    }
-    .diag-card p {
-        color: var(--text-color, #cbd5e1);
-        margin-bottom: 0.4rem;
-        font-size: 0.92rem;
-    }
-    .diag-card strong {
-        color: var(--text-color, #f1f5f9);
-    }
-    .diag-card code {
-        background-color: rgba(0, 180, 216, 0.15) !important;
-        color: #38bdf8 !important;
-        padding: 2px 6px !important;
-        border-radius: 4px !important;
-        font-weight: 600;
-    }
-    .diag-muted {
-        color: rgba(148, 163, 184, 0.85);
-        font-size: 0.82rem;
-        margin-top: 0.35rem;
-    }
-    .diag-status-ok { color: #22c55e; font-weight: 700; }
-    .diag-status-warn { color: #f59e0b; font-weight: 700; }
-    .diag-status-off { color: #94a3b8; font-weight: 600; }
-    .diag-status-err { color: #ef4444; font-weight: 700; }
-    
-    /* Badges de Conexión */
-    .badge-conn-on { background-color: #2ecc71; color: white; padding: 4px 10px; border-radius: 12px; font-weight: 600; font-size: 0.85rem; }
-    .badge-conn-off { background-color: #e74c3c; color: white; padding: 4px 10px; border-radius: 12px; font-weight: 600; font-size: 0.85rem; }
-</style>
-""", unsafe_allow_html=True)
+@st.cache_resource(show_spinner="Inicializando base de datos...")
+def get_database():
+    return initialize_database(recover_interrupted=True)
 
-# ==============================================================================
-# 2. GESTIÓN DEL MODELO PREDICTIVO (RANDOM FOREST)
-# ==============================================================================
-def generar_dataset_si_no_existe(ruta_csv: Path) -> pd.DataFrame:
-    """Genera un dataset sintético calibrado si no se encuentra el archivo local."""
-    np.random.seed(42)
-    n_samples = 800
-    temp_amb = np.random.uniform(20.0, 42.0, n_samples)
-    hum_amb = np.random.uniform(35.0, 85.0, n_samples)
-    temp_grano = np.clip(temp_amb + np.random.uniform(-2.0, 5.0, n_samples), 18.0, 48.0)
-    
-    factor_secado = (temp_grano * 0.45 + temp_amb * 0.35) / (hum_amb * 0.5)
-    tiempo_restante = np.clip(60.0 - (factor_secado * 25.0) + np.random.normal(0, 2.0, n_samples), 0.5, 48.0)
-    
-    df = pd.DataFrame({
-        'Temp_Ambiente': np.round(temp_amb, 1),
-        'Humedad_Ambiente': np.round(hum_amb, 1),
-        'Temp_Grano': np.round(temp_grano, 1),
-        'Tiempo_Restante_Horas': np.round(tiempo_restante, 1)
-    })
-    ruta_csv.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(ruta_csv, index=False)
-    return df
 
-@st.cache_resource(show_spinner="Cargando modelo predictivo...")
-def obtener_o_entrenar_modelo():
-    info = {"reentrenado": False, "r2": None, "mae": None, "muestras": 0}
-    
-    if MODEL_PATH.exists():
-        try:
-            modelo = joblib.load(MODEL_PATH)
-            return modelo, info
-        except Exception:
-            pass
-            
-    if not DATASET_PATH.exists():
-        generar_dataset_si_no_existe(DATASET_PATH)
-        
-    df = pd.read_csv(DATASET_PATH)
-    columnas_req = ['Temp_Ambiente', 'Humedad_Ambiente', 'Temp_Grano', 'Tiempo_Restante_Horas']
-    for col in columnas_req:
-        if col not in df.columns:
-            raise ValueError(f"Falta columna obligatoria '{col}' en {DATASET_PATH}")
-            
-    X = df[['Temp_Ambiente', 'Humedad_Ambiente', 'Temp_Grano']]
-    y = df['Tiempo_Restante_Horas']
-    
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    modelo = RandomForestRegressor(n_estimators=100, max_depth=12, random_state=42, n_jobs=1)
-    modelo.fit(X_train, y_train)
-    
-    y_pred = modelo.predict(X_test)
-    r2 = float(r2_score(y_test, y_pred))
-    mae = float(mean_absolute_error(y_test, y_pred))
-    
-    MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
-    joblib.dump(modelo, MODEL_PATH)
-    
-    info.update({"reentrenado": True, "r2": r2, "mae": mae, "muestras": len(df)})
-    return modelo, info
+@st.cache_resource(show_spinner="Cargando Random Forest...")
+def get_predictor():
+    return load_or_train_predictor()
 
-modelo_ml, info_modelo = obtener_o_entrenar_modelo()
 
-# ==============================================================================
-# 3. GESTIÓN PERSISTENTE DE CONEXIÓN SERIAL Y ESTADO DE COMPONENTES
-# ==============================================================================
-if 'serial_conn' not in st.session_state:
-    st.session_state.serial_conn = None
-if 'puerto_actual' not in st.session_state:
-    st.session_state.puerto_actual = ""
-if 'analisis_en_ejecucion' not in st.session_state:
-    st.session_state.analisis_en_ejecucion = False
-if 'historial' not in st.session_state:
-    st.session_state.historial = pd.DataFrame(columns=[
-        'Timestamp', 'Temp_Ambiente', 'Humedad_Ambiente', 'Temp_Grano', 'Tiempo_Restante_Estimado'
-    ])
-if 'ultimo_comando' not in st.session_state:
-    st.session_state.ultimo_comando = "Ninguno"
-if 'lineas_corruptas' not in st.session_state:
-    st.session_state.lineas_corruptas = 0
+@st.cache_resource(show_spinner="Preparando consumidor MQTT...")
+def get_mqtt():
+    return create_optional_streamlit_subscriber()
 
-# Estado de actuadores, semáforo y pantalla
-if 'estado_led_verde' not in st.session_state:
-    st.session_state.estado_led_verde = False
-if 'estado_led_amarillo' not in st.session_state:
-    st.session_state.estado_led_amarillo = False
-if 'estado_led_rojo' not in st.session_state:
-    st.session_state.estado_led_rojo = False
-if 'estado_ventilador' not in st.session_state:
-    st.session_state.estado_ventilador = "0% (Apagado)"
-if 'texto_display_actual' not in st.session_state:
-    st.session_state.texto_display_actual = "SECADO CAFE IA"
 
-# Parámetros y Estado del Lazo Cerrado de Temperatura Ideal (Perú)
-if 'region_seleccionada' not in st.session_state:
-    st.session_state.region_seleccionada = "San Martín (Moyobamba / Tarapoto)"
-if 'temp_ideal_consigna' not in st.session_state:
-    st.session_state.temp_ideal_consigna = DEFAULT_IDEAL_TEMP
-if 'estado_semaforo_codigo' not in st.session_state:
-    st.session_state.estado_semaforo_codigo = "IDEAL_ALCANZADA"
-if 'color_semaforo_led' not in st.session_state:
-    st.session_state.color_semaforo_led = "VERDE"
-if 'sim_grano_actual' not in st.session_state:
-    st.session_state.sim_grano_actual = 28.5  # Inicia a 28.5°C (5.5°C sobre la meta 23°C) para ver enfriar al ventilador
+database = get_database()
+manager = ExperimentManager(database)
+history_repo = HistoryRepository(database)
+predictor, model_eval = get_predictor()
+mqtt_subscriber, mqtt_status = get_mqtt()
+processor = TelemetryProcessor(predictor)
 
-# Estado y salud de sensores
-if 'sensor_dht_estado' not in st.session_state:
-    st.session_state.sensor_dht_estado = "⚪ En espera de telemetría"
-if 'sensor_ds_estado' not in st.session_state:
-    st.session_state.sensor_ds_estado = "⚪ En espera de telemetría"
-if 'ultima_temp_amb' not in st.session_state:
-    st.session_state.ultima_temp_amb = None
-if 'ultima_hum_amb' not in st.session_state:
-    st.session_state.ultima_hum_amb = None
-if 'ultima_temp_grano' not in st.session_state:
-    st.session_state.ultima_temp_grano = None
-if 'ultima_hora_lectura' not in st.session_state:
-    st.session_state.ultima_hora_lectura = "Sin lecturas previas"
 
-def enviar_comando(caracter: str, descripcion: str = "") -> bool:
-    """Envía comando serial y actualiza el estado de los actuadores sin reconectar el puerto."""
-    st.session_state.ultimo_comando = f"'{caracter}' ({descripcion})"
-    
-    # Actualización reactiva del estado virtual de actuadores
-    if caracter in ('V', 'v'):
-        st.session_state.estado_led_verde = True
-        st.session_state.estado_led_amarillo = False
-        st.session_state.estado_led_rojo = False
-    elif caracter in ('A', 'a'):
-        st.session_state.estado_led_verde = False
-        st.session_state.estado_led_amarillo = True
-        st.session_state.estado_led_rojo = False
-    elif caracter in ('R', 'r'):
-        st.session_state.estado_led_verde = False
-        st.session_state.estado_led_amarillo = False
-        st.session_state.estado_led_rojo = True
-    elif caracter == '1':
-        st.session_state.estado_ventilador = "60% (PWM 153)"
-    elif caracter == '2':
-        st.session_state.estado_ventilador = "100% (PWM 255)"
-    elif caracter == '0':
-        st.session_state.estado_led_verde = False
-        st.session_state.estado_led_amarillo = False
-        st.session_state.estado_led_rojo = False
-        st.session_state.estado_ventilador = "0% (Apagado)"
-    elif caracter.startswith('D:') or caracter.startswith('d:'):
-        st.session_state.texto_display_actual = caracter[2:].strip()
-    elif caracter.startswith('T:') or caracter.startswith('t:'):
-        try:
-            val_str = caracter[2:].strip()
-            st.session_state.temp_ideal_consigna = float(val_str)
-        except ValueError:
-            pass
+def init_state() -> None:
+    defaults: dict[str, Any] = {
+        "page": "Dashboard general", "demo_mode": False, "selected_node": "secador_01",
+        "telemetry": [], "last_ack": None, "last_state": None, "last_error": None,
+        "invalid_messages": 0, "pending_command": None, "sim_sequence": 0,
+        "sim_grain": 28.5, "current_experiment_id": None, "command_log": [],
+    }
+    for key, value in defaults.items():
+        st.session_state.setdefault(key, value)
 
-    ser = st.session_state.serial_conn
-    if ser is not None and getattr(ser, 'is_open', False):
-        try:
-            # Enviar con delimitador de línea para comandos de texto y caracteres
-            payload = caracter if caracter.endswith('\n') else (caracter + '\n')
-            ser.write(payload.encode('utf-8'))
-            ser.flush()
-            return True
-        except (serial.SerialException, OSError) as e:
-            st.error(f"Error al enviar comando: {e}")
-            return False
-    else:
-        if st.session_state.get('modo_simulacion', False):
-            return True
-        st.warning("⚠️ El puerto serial no está conectado.")
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def poll_mqtt() -> None:
+    if mqtt_subscriber is None:
+        return
+    for message in mqtt_subscriber.poll():
+        topic = message.pop("_topic", "")
+        if topic.endswith("/ack"):
+            st.session_state.last_ack = message
+            st.session_state.command_log.append({"timestamp": message.get("timestamp", utc_now()), **message})
+            pending = st.session_state.pending_command
+            if pending and message.get("accepted") and pending.get("request_id") == message.get("request_id"):
+                if pending["action"] == "start":
+                    try:
+                        manager.start(pending["experiment_id"])
+                        st.session_state.current_experiment_id = pending["experiment_id"]
+                    except (KeyError, ValueError) as error:
+                        st.session_state.last_error = str(error)
+                elif pending["action"] == "pause":
+                    try:
+                        manager.pause(pending["experiment_id"])
+                    except (KeyError, ValueError) as error:
+                        st.session_state.last_error = str(error)
+                elif pending["action"] == "resume":
+                    try:
+                        manager.resume(pending["experiment_id"])
+                    except (KeyError, ValueError) as error:
+                        st.session_state.last_error = str(error)
+                st.session_state.pending_command = None
+        elif topic.endswith("/estado"):
+            st.session_state.last_state = message
+        elif topic.endswith("/telemetria"):
+            message["_received_at"] = utc_now()
+            st.session_state.telemetry.append(message)
+            st.session_state.telemetry = st.session_state.telemetry[-300:]
+            st.session_state.selected_node = message.get("node_id", st.session_state.selected_node)
+
+
+def publish_command(command: str, action: Optional[str] = None, experiment_id: Optional[int] = None) -> bool:
+    if mqtt_subscriber is None or not mqtt_subscriber.is_connected:
+        st.warning("MQTT no está conectado. Activa MQTT_STREAMLIT_ENABLED y verifica EMQX.")
         return False
+    request_id = uuid.uuid4().hex[:12]
+    try:
+        mqtt_subscriber.publish_command(st.session_state.selected_node, command, request_id)
+    except Exception as error:
+        st.session_state.last_error = str(error)
+        st.error(f"No se pudo enviar el comando: {error}")
+        return False
+    st.session_state.pending_command = {"request_id": request_id, "command": command, "action": action, "experiment_id": experiment_id}
+    return True
 
-# ==============================================================================
-# 4. BARRA LATERAL (SIDEBAR) - CONEXIÓN SERIAL
-# ==============================================================================
-st.sidebar.markdown("### 🔌 Conexión con Arduino")
 
-puertos_detectados = [p.device for p in serial.tools.list_ports.comports()]
-puerto_default = puertos_detectados[0] if puertos_detectados else ("/dev/ttyUSB0" if os.name != 'nt' else "COM3")
+def demo_reading() -> None:
+    current = st.session_state.telemetry[-1] if st.session_state.telemetry else None
+    previous = float(current.get("t_grano", st.session_state.sim_grain)) if current else st.session_state.sim_grain
+    reading = generate_simulated_telemetry(23.0, previous)
+    st.session_state.sim_sequence += 1
+    st.session_state.sim_grain = reading.temp_grano
+    payload = {
+        "node_id": "sim1", "timestamp": utc_now(), "sequence": st.session_state.sim_sequence,
+        "t_amb": reading.temp_ambiente, "hum": reading.humedad_ambiente,
+        "t_grano": reading.temp_grano, "sp": 23.0, "modo": "MONITOREO",
+        "simulado": True, "version": "1.0",
+    }
+    st.session_state.telemetry.append(payload)
+    st.session_state.telemetry = st.session_state.telemetry[-300:]
 
-if puertos_detectados:
-    st.sidebar.caption(f"Puertos activos: {', '.join(puertos_detectados)}")
-else:
-    st.sidebar.caption("No se detectaron puertos automáticamente.")
 
-puerto_seleccionado = st.sidebar.text_input("Puerto Serial:", value=puerto_default)
-baud_rate = st.sidebar.selectbox("Velocidad (Baud rate):", options=[9600, 19200, 38400, 57600, 115200], index=0)
+def current_frame() -> Optional[dict]:
+    node = st.session_state.selected_node
+    candidates = [item for item in st.session_state.telemetry if item.get("node_id") == node]
+    return candidates[-1] if candidates else (st.session_state.telemetry[-1] if st.session_state.telemetry else None)
 
-modo_simulacion = st.sidebar.checkbox("🧪 Modo Simulación (Sin Arduino)", value=False)
-st.session_state.modo_simulacion = modo_simulacion
 
-st.sidebar.markdown("---")
-col_c1, col_c2 = st.sidebar.columns(2)
+def frame_df() -> pd.DataFrame:
+    rows = [item for item in st.session_state.telemetry if "t_grano" in item]
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
+    return df.sort_values("timestamp")
 
-esta_conectado = (st.session_state.serial_conn is not None and st.session_state.serial_conn.is_open) or modo_simulacion
 
-if not esta_conectado:
-    if col_c1.button("▶ Conectar", type="primary", use_container_width=True):
-        if modo_simulacion:
-            st.session_state.puerto_actual = "SIMULADOR"
-            st.rerun()
-        else:
-            try:
-                ser = serial.Serial(port=puerto_seleccionado, baudrate=baud_rate, timeout=1.5, write_timeout=1.5)
-                ser.reset_input_buffer()
-                time.sleep(1.5)  # Estabilización de línea DTR
-                st.session_state.serial_conn = ser
-                st.session_state.puerto_actual = puerto_seleccionado
-                st.rerun()
-            except serial.SerialException as err:
-                st.sidebar.error(f"Fallo al abrir {puerto_seleccionado}: {err}")
-else:
-    if col_c2.button("⏹ Desconectar", type="secondary", use_container_width=True):
-        st.session_state.analisis_en_ejecucion = False
-        if st.session_state.serial_conn is not None:
-            try:
-                st.session_state.serial_conn.write(b'P')
-                st.session_state.serial_conn.close()
-            except Exception:
-                pass
-            st.session_state.serial_conn = None
+def metric_value(value: Any, suffix: str = "") -> str:
+    return "No disponible" if value is None else f"{value}{suffix}"
+
+
+def render_sidebar() -> None:
+    st.sidebar.title("☕ Secado IoT")
+    st.sidebar.caption("Plataforma de monitoreo experimental")
+    st.sidebar.radio("Sección", [
+        "Dashboard general", "Gestión de experimentos", "Control de hardware",
+        "Historial", "Comparación ANTES/DESPUÉS", "IA y diagnóstico",
+    ], key="page")
+    st.sidebar.divider()
+    st.sidebar.selectbox("Nodo", ["secador_01", "secador_02", "secador_03", "secador_04", "secador_05", "sim1", "sim2", "sim3", "sim4"], key="selected_node")
+    st.sidebar.checkbox("Modo demostración (datos simulados)", key="demo_mode")
+    mqtt_online = bool(mqtt_subscriber and mqtt_subscriber.is_connected)
+    st.sidebar.markdown(f"**EMQX:** {'🟢 Conectado' if mqtt_online else '🔴 No disponible'}")
+    st.sidebar.caption(mqtt_status if mqtt_subscriber is not None else "Deshabilitado por configuración")
+    if st.sidebar.button("Actualizar", width="stretch"):
         st.rerun()
 
-if esta_conectado:
-    st.sidebar.markdown(f'<span class="badge-conn-on">● CONECTADO ({st.session_state.puerto_actual})</span>', unsafe_allow_html=True)
-else:
-    st.sidebar.markdown('<span class="badge-conn-off">○ DESCONECTADO</span>', unsafe_allow_html=True)
 
-st.sidebar.markdown("---")
-st.sidebar.markdown("### 🤖 Modelo de IA")
-st.sidebar.write(f"**Archivo:** `{MODEL_PATH.name}`")
-if info_modelo.get("r2") is not None:
-    st.sidebar.write(f"**$R^2$:** `{info_modelo['r2']:.3f}` | **MAE:** `{info_modelo['mae']:.2f} h`")
-
-# ==============================================================================
-# 5. ENCABEZADO Y PESTAÑAS (st.tabs)
-# ==============================================================================
-st.markdown("""
-<div class="main-header">
-    <h1>Monitor IoT - Secado de Granos con IA</h1>
-    <p>Puerta de Enlace Bidireccional para Pruebas de Actuadores, Diagnóstico de Componentes y Predicción de Secado</p>
-</div>
-""", unsafe_allow_html=True)
-
-tab_hardware, tab_analisis, tab_estado = st.tabs([
-    "🛠️ Pestaña 1: Prueba de Hardware",
-    "☕ Pestaña 2: Análisis de Secado (IA)",
-    "🩺 Pestaña 3: Diagnóstico y Estado de Componentes"
-])
-
-# ------------------------------------------------------------------------------
-# PESTAÑA 1: PRUEBA DE HARDWARE
-# ------------------------------------------------------------------------------
-with tab_hardware:
-    st.subheader("Prueba y Diagnóstico de Actuadores")
-    st.write("Presiona los botones para activar cada actuador de forma individual. La conexión se mantiene abierta sin reiniciar el Arduino.")
-
-    if not esta_conectado:
-        st.warning("⚠️ Presiona **'▶ Conectar'** en la barra lateral para habilitar el control del Arduino.")
-
-    st.markdown("#### 💡 Indicadores Luminosos (LEDs)")
-    col_led1, col_led2, col_led3 = st.columns(3)
-
-    with col_led1:
-        # Comando 'V' -> Pin D4 (LED Verde)
-        if st.button("🟢 Probar LED Verde", use_container_width=True, disabled=not esta_conectado):
-            if enviar_comando('V', "LED Verde (Pin D4)"):
-                st.toast("Comando 'V' enviado: LED Verde", icon="🟢")
-
-    with col_led2:
-        # Comando 'A' -> Pin D6 (LED Amarillo - Corregido mapeo físico)
-        if st.button("🟡 Probar LED Amarillo", use_container_width=True, disabled=not esta_conectado):
-            if enviar_comando('A', "LED Amarillo (Pin D6)"):
-                st.toast("Comando 'A' enviado: LED Amarillo", icon="🟡")
-
-    with col_led3:
-        # Comando 'R' -> Pin D5 (LED Rojo - Corregido mapeo físico)
-        if st.button("🔴 Probar LED Rojo", use_container_width=True, disabled=not esta_conectado):
-            if enviar_comando('R', "LED Rojo (Pin D5)"):
-                st.toast("Comando 'R' enviado: LED Rojo", icon="🔴")
-
-    st.markdown("---")
-    st.markdown("#### 🌀 Control de Ventilación y Apagado General")
-    col_fan1, col_fan2, col_off = st.columns(3)
-
-    with col_fan1:
-        if st.button("💨 Ventilador al 60%", use_container_width=True, disabled=not esta_conectado):
-            if enviar_comando('1', "Ventilador 60% (Pin D9 PWM)"):
-                st.toast("Comando '1' enviado: Ventilador 60%", icon="💨")
-
-    with col_fan2:
-        if st.button("🌪️ Ventilador al 100%", use_container_width=True, disabled=not esta_conectado):
-            if enviar_comando('2', "Ventilador 100% (Pin D9 PWM)"):
-                st.toast("Comando '2' enviado: Ventilador 100%", icon="🌪️")
-
-    with col_off:
-        if st.button("🛑 Apagar Todo", type="primary", use_container_width=True, disabled=not esta_conectado):
-            if enviar_comando('0', "Apagado General"):
-                st.toast("Comando '0' enviado: Todos los actuadores apagados", icon="🛑")
-
-    st.markdown("---")
-    st.markdown("#### 📋 Estado Actual de los Actuadores")
-    c_st1, c_st2, c_st3, c_st4 = st.columns(4)
-    c_st1.metric("LED Verde (D4)", "🟢 ENCENDIDO" if st.session_state.estado_led_verde else "⚫ Apagado")
-    c_st2.metric("LED Amarillo (D6)", "🟡 ENCENDIDO" if st.session_state.estado_led_amarillo else "⚫ Apagado")
-    c_st3.metric("LED Rojo (D5)", "🔴 ENCENDIDO" if st.session_state.estado_led_rojo else "⚫ Apagado")
-    c_st4.metric("Ventilador (D9 PWM)", st.session_state.estado_ventilador)
-
-    st.markdown("---")
-    st.markdown("#### 🎯 Consigna de Temperatura Ideal (Comando 'T:XX.X')")
-    st.caption("Fija en el microcontrolador la temperatura ideal hacia la cual debe regular el lazo cerrado.")
-    col_t_in, col_t_btn = st.columns([2.5, 2.4])
-    with col_t_in:
-        temp_input = st.number_input(
-            "Temperatura Ideal (°C) [Demo Prototipo -15°C]:",
-            min_value=15.0,
-            max_value=38.0,
-            value=float(st.session_state.temp_ideal_consigna),
-            step=0.5,
-            key="temp_hardware_input"
-        )
-    with col_t_btn:
-        st.write("")
-        st.write("")
-        if st.button("📤 Enviar Consigna Térmica", use_container_width=True, disabled=not esta_conectado):
-            if enviar_comando(f"T:{temp_input:.1f}", f"Consigna Térmica {temp_input:.1f}°C"):
-                st.session_state.temp_ideal_consigna = temp_input
-                st.toast(f"Comando 'T:{temp_input:.1f}' enviado al Arduino", icon="🎯")
-
-    st.markdown("---")
-    st.markdown("#### 📟 Prueba de Pantalla LCD (I2C 16x2)")
-    st.caption("Escribe una frase y envíala al Arduino para desplegarla en la pantalla LCD (Pines A4 SDA y A5 SCL del Arduino Nano).")
-
-    col_lcd_in, col_lcd_btn1, col_lcd_btn2 = st.columns([2.5, 1.2, 1.2])
-    with col_lcd_in:
-        frase_display = st.text_input(
-            "Frase para el Display (máx. 32 caracteres):",
-            value=st.session_state.texto_display_actual,
-            max_chars=32,
-            help="Si excede los 16 caracteres, el Arduino divide automáticamente el texto en las 2 filas del LCD."
-        )
-    with col_lcd_btn1:
-        st.write("")
-        st.write("")
-        if st.button("📤 Enviar al LCD", use_container_width=True, disabled=not esta_conectado):
-            if enviar_comando(f"D:{frase_display}", f"Display: '{frase_display}'"):
-                st.session_state.texto_display_actual = frase_display
-                st.toast(f"Frase enviada al LCD: '{frase_display}'", icon="📟")
-
-    with col_lcd_btn2:
-        st.write("")
-        st.write("")
-        if st.button("🧹 Limpiar LCD", use_container_width=True, disabled=not esta_conectado):
-            if enviar_comando("D: ", "Display Limpio"):
-                st.session_state.texto_display_actual = ""
-                st.toast("Pantalla LCD limpiada", icon="🧹")
-
-    # Vista Previa Virtual de la Pantalla LCD (16x2)
-    st.markdown("**Vista Previa Virtual del Display LCD (16x2):**")
-    txt_disp = st.session_state.texto_display_actual
-    linea1 = (txt_disp[:16]).ljust(16)
-    linea2 = (txt_disp[16:32]).ljust(16)
-    st.markdown(f"""
-    <div style="background-color: #0b2512; border: 3px solid #1e3a29; border-radius: 8px; padding: 12px 18px; width: fit-content; margin-bottom: 12px; box-shadow: 0 4px 10px rgba(0,0,0,0.25);">
-        <div style="font-family: 'Courier New', monospace; font-weight: 700; font-size: 1.15rem; color: #4ade80; letter-spacing: 2px;">
-            [{linea1}]
-        </div>
-        <div style="font-family: 'Courier New', monospace; font-weight: 700; font-size: 1.15rem; color: #4ade80; letter-spacing: 2px;">
-            [{linea2}]
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    st.info(f"📡 Último comando registrado en bus serial: **{st.session_state.ultimo_comando}**")
-
-# ------------------------------------------------------------------------------
-# PESTAÑA 2: ANÁLISIS DE SECADO (IA)
-# ------------------------------------------------------------------------------
-with tab_analisis:
-    st.subheader("Monitoreo y Predicción en Tiempo Real")
-    st.caption("Predicción de temperatura ideal de secado por región de Perú y control automático en lazo cerrado con Arduino Nano.")
-
-    # 1. Selector de Región Cafetalera / Cacaotera de Perú
-    st.markdown("#### 🇵🇪 Región Cafetalera / Cacaotera de Perú (Predicción de Temperatura Ideal)")
-    regiones_lista = list(PERU_REGIONS_DATA.keys())
-    idx_def = regiones_lista.index(st.session_state.region_seleccionada) if st.session_state.region_seleccionada in regiones_lista else 0
-
-    if 'region_anterior' not in st.session_state:
-        st.session_state.region_anterior = st.session_state.region_seleccionada
-
-    col_reg1, col_reg2 = st.columns([1.5, 2.5])
-    with col_reg1:
-        region_sel = st.selectbox(
-            "Región de Producción:",
-            options=regiones_lista,
-            index=idx_def,
-            help="Adapta la consigna según las condiciones psicrométricas y precipitaciones típicas de cada zona productora del Perú."
-        )
-
-    perfil = PERU_REGIONS_DATA[region_sel]
-    
-    # Estimación de Temperatura Ideal de Secado ML (calibrada para demo -15°C)
-    hum_ref = st.session_state.ultima_hum_amb if st.session_state.ultima_hum_amb is not None else perfil["humedad_tipica"]
-    temp_ref = st.session_state.ultima_temp_amb if st.session_state.ultima_temp_amb is not None else 23.0
-    temp_ideal_predicha = predict_ideal_temperature(region_sel, hum_ref, temp_ref)
-
-    # Si el usuario selecciona otra región, actualizar de inmediato la consigna activa y enviar a Arduino
-    if region_sel != st.session_state.region_anterior:
-        st.session_state.region_anterior = region_sel
-        st.session_state.region_seleccionada = region_sel
-        st.session_state.temp_ideal_consigna = temp_ideal_predicha
-        if esta_conectado:
-            enviar_comando(f"T:{temp_ideal_predicha:.1f}", f"Actualizar región a {region_sel}")
-
-    with col_reg2:
-        st.info(
-            f"🌧️ **Zona:** {perfil['zona']} | **Precipitación:** `{perfil['precipitacion_anual_mm']} mm/año` | **Humedad Típica:** `{perfil['humedad_tipica']}%`\n\n"
-            f"⚠️ **Riesgo:** {perfil['riesgo_humedad']}\n\n"
-            f"💡 *{perfil['descripcion']}*"
-        )
-
-    # 2. Tarjetas de Consigna de Temperatura y Control
-    col_t1, col_t2 = st.columns([1.4, 2.6])
-    with col_t1:
-        st.markdown(f"""
-        <div class="prediction-card" style="border-color: #f59e0b; background: linear-gradient(135deg, #451a03 0%, #1e1b4b 100%);">
-            <div class="prediction-title" style="color: #fde68a;">🎯 Temp. Ideal Prototipo (Demo)</div>
-            <div class="prediction-value" style="color: #fbbf24;">{st.session_state.temp_ideal_consigna:.1f}</div>
-            <div class="prediction-unit" style="color: #fde68a;">°C (Consigna Activa)</div>
-            <div style="font-size: 0.82rem; color: #fef08a; margin-top: 6px; font-weight: 600;">
-                📍 {perfil['departamento']} (ML: {temp_ideal_predicha:.1f}°C)
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-    with col_t2:
-        st.caption("Consigna de temperatura ideal reducida 15°C para permitir demostración práctica inmediata a temperatura ambiente.")
-        col_c_sync, col_c_man = st.columns([1.3, 1.7])
-        with col_c_sync:
-            st.write("")
-            if st.button("📤 Sincronizar con Arduino", use_container_width=True, disabled=not esta_conectado):
-                if enviar_comando(f"T:{st.session_state.temp_ideal_consigna:.1f}", f"Temp Ideal {st.session_state.temp_ideal_consigna:.1f}°C"):
-                    st.toast(f"Consigna T:{st.session_state.temp_ideal_consigna:.1f}°C transmitida al Arduino y LCD", icon="🎯")
-        with col_c_man:
-            temp_manual = st.number_input(
-                "Ajustar Consigna de Secado (°C):",
-                min_value=15.0,
-                max_value=38.0,
-                value=float(st.session_state.temp_ideal_consigna),
-                step=0.5,
-                key="temp_ideal_analisis_input"
-            )
-            if temp_manual != st.session_state.temp_ideal_consigna:
-                st.session_state.temp_ideal_consigna = temp_manual
-                if esta_conectado:
-                    enviar_comando(f"T:{temp_manual:.1f}", f"Ajuste manual {temp_manual:.1f}°C")
-
-    st.markdown("---")
-
-    col_btn_ini, col_btn_pau, _ = st.columns([1.3, 1.3, 2.4])
-    
-    with col_btn_ini:
-        if st.button("▶ Iniciar Análisis", type="primary", use_container_width=True, disabled=not esta_conectado or st.session_state.analisis_en_ejecucion):
-            # Enviar automáticamente la consigna térmica predicha antes de iniciar
-            enviar_comando(f"T:{st.session_state.temp_ideal_consigna:.1f}", f"Consigna Inicial {st.session_state.temp_ideal_consigna:.1f}°C")
-            time.sleep(0.1)
-            enviar_comando('I', "Iniciar Análisis y Telemetría")
-            st.session_state.analisis_en_ejecucion = True
-            st.rerun()
-
-    with col_btn_pau:
-        if st.button("⏸ Pausar Análisis", type="secondary", use_container_width=True, disabled=not st.session_state.analisis_en_ejecucion):
-            enviar_comando('P', "Pausar Análisis")
-            st.session_state.analisis_en_ejecucion = False
-            st.rerun()
-
-    status_area = st.empty()
-    semaforo_area = st.empty()
-    metrics_area = st.container()
-    charts_area = st.empty()
-    log_area = st.expander("📝 Registro de Comunicaciones Serial y Depuración", expanded=False)
-
-    if st.session_state.analisis_en_ejecucion:
-        status_area.info("📡 **Análisis en ejecución:** Recibiendo telemetría del Arduino cada 2 segundos...")
-        ser = st.session_state.serial_conn
-
-        while st.session_state.analisis_en_ejecucion:
-            raw_line = ""
-            try:
-                if modo_simulacion:
-                    time.sleep(2.0)
-                    sim_t_amb = round(float(np.random.uniform(25.0, 31.0)), 1)
-                    sim_h_amb = round(float(np.random.uniform(55.0, 78.0)), 1)
-                    
-                    # Dinámica de simulación reactiva del lazo cerrado
-                    ideal_t = st.session_state.temp_ideal_consigna
-                    grano_prev = st.session_state.get('sim_grano_actual', ideal_t + 4.0)
-                    error_sim = grano_prev - ideal_t
-
-                    if abs(error_sim) > 2.2:
-                        # Lejos: Ventilador al 100% reduce la temperatura rápidamente
-                        grano_prev -= 0.8
-                    elif abs(error_sim) > 0.8:
-                        # En camino: Ventilador al 60% reduce suavemente
-                        grano_prev -= 0.4
-                    else:
-                        # Meta alcanzada: Ventilador apagado. Fluctúa levemente
-                        # Ocasionalmente sube para demostrar que el ventilador se vuelve a prender
-                        fluctuacion = float(np.random.choice([-0.2, 0.0, 0.2, 1.8], p=[0.3, 0.4, 0.2, 0.1]))
-                        grano_prev = ideal_t + fluctuacion
-
-                    st.session_state.sim_grano_actual = round(grano_prev, 1)
-                    sim_t_grano = st.session_state.sim_grano_actual
-                    raw_line = f"{sim_t_amb},{sim_h_amb},{sim_t_grano}"
-                else:
-                    if ser is None or not ser.is_open:
-                        raise serial.SerialException("El puerto serie se encuentra cerrado.")
-                    
-                    bytes_leidos = ser.readline()
-                    if not bytes_leidos:
-                        continue
-                    raw_line = bytes_leidos.decode('utf-8', errors='ignore').strip()
-
-                if not raw_line or raw_line.startswith("ACK") or raw_line.startswith("SISTEMA"):
-                    continue
-
-                partes = raw_line.split(',')
-                if len(partes) != 3:
-                    raise ValueError(f"Trama corrupta ({len(partes)} valores): '{raw_line}'")
-
-                temp_amb = float(partes[0].strip())
-                hum_amb = float(partes[1].strip())
-                temp_grano = float(partes[2].strip())
-
-                if not (-10.0 <= temp_amb <= 80.0 and 0.0 <= hum_amb <= 100.0 and -10.0 <= temp_grano <= 85.0):
-                    raise ValueError(f"Lectura fuera de rango físico: {temp_amb}°C, {hum_amb}%, {temp_grano}°C")
-
-                # Actualizar diagnóstico de salud de sensores
-                ahora = datetime.datetime.now().strftime("%H:%M:%S")
-                st.session_state.sensor_dht_estado = "🟢 Operativo (Lectura íntegra)"
-                st.session_state.sensor_ds_estado = "⚠️ Sobrecalentado (>45°C)" if temp_grano > 45.0 else "🟢 Operativo (En rango)"
-                st.session_state.ultima_temp_amb = temp_amb
-                st.session_state.ultima_hum_amb = hum_amb
-                st.session_state.ultima_temp_grano = temp_grano
-                st.session_state.ultima_hora_lectura = ahora
-
-                # Evaluación de Lazo Cerrado y Semáforo Térmico
-                estado_termico, color_led, pwm_fan, label_fan = evaluate_thermal_state(
-                    temp_grano, st.session_state.temp_ideal_consigna
-                )
-                st.session_state.estado_semaforo_codigo = estado_termico
-                st.session_state.color_semaforo_led = color_led
-                st.session_state.estado_ventilador = label_fan
-                st.session_state.estado_led_verde = (color_led == "VERDE")
-                st.session_state.estado_led_amarillo = (color_led == "AMARILLO")
-                st.session_state.estado_led_rojo = (color_led == "ROJO")
-
-                # Inferencia con Random Forest para tiempo restante
-                features = pd.DataFrame([{
-                    'Temp_Ambiente': temp_amb,
-                    'Humedad_Ambiente': hum_amb,
-                    'Temp_Grano': temp_grano
-                }])
-                tiempo_restante = float(modelo_ml.predict(features)[0])
-                tiempo_restante = max(0.0, tiempo_restante)
-
-                if temp_grano > 45.0:
-                    etiqueta_estado = "⚠️ ALERTA: Sobrecalentamiento (>45°C)"
-                    clase_badge = "badge-danger"
-                elif tiempo_restante > 30.0:
-                    etiqueta_estado = "Fase 1: Alto Contenido de Humedad"
-                    clase_badge = "badge-normal"
-                elif tiempo_restante > 10.0:
-                    etiqueta_estado = "Fase 2: Deshidratación Constante"
-                    clase_badge = "badge-normal"
-                else:
-                    etiqueta_estado = "Fase 3: Etapa Final de Secado"
-                    clase_badge = "badge-final"
-
-                fila = {
-                    'Timestamp': ahora,
-                    'Temp_Ambiente': temp_amb,
-                    'Humedad_Ambiente': hum_amb,
-                    'Temp_Grano': temp_grano,
-                    'Temp_Ideal': st.session_state.temp_ideal_consigna,
-                    'Tiempo_Restante_Estimado': round(tiempo_restante, 1)
-                }
-                st.session_state.historial = pd.concat([
-                    st.session_state.historial,
-                    pd.DataFrame([fila])
-                ], ignore_index=True).tail(60)
-
-                # Renderizado del Semáforo Térmico
-                if color_led == "VERDE":
-                    css_banner = "semaforo-verde"
-                    icono_banner = "🟢"
-                    texto_banner = "TEMPERATURA IDEAL ALCANZADA (Diferencia ≤ ±0.8°C)"
-                    accion_banner = "Ventilador APAGADO (0%) — Preservando temperatura ideal de secado"
-                elif color_led == "AMARILLO":
-                    css_banner = "semaforo-amarillo"
-                    icono_banner = "🟡"
-                    texto_banner = "EN CAMINO A LA TEMPERATURA IDEAL (Diferencia ≤ 2.2°C)"
-                    accion_banner = "Ventilador al 60% (PWM 153) — Estabilización suave en curso"
-                else:
-                    css_banner = "semaforo-rojo"
-                    icono_banner = "🔴"
-                    texto_banner = "FALTA MUCHO PARA LA TEMPERATURA IDEAL (Diferencia > 2.2°C)"
-                    accion_banner = "Ventilador al 100% (PWM 255) — Máxima convección para forzar ajuste"
-
-                with semaforo_area:
-                    delta_t = temp_grano - st.session_state.temp_ideal_consigna
-                    st.markdown(f"""
-                    <div class="semaforo-banner {css_banner}">
-                        <div>
-                            <div style="font-size: 1.15rem; font-weight: 800; display: flex; align-items: center; gap: 8px;">
-                                {icono_banner} {texto_banner}
-                            </div>
-                            <div style="font-size: 0.92rem; margin-top: 4px; opacity: 0.92;">
-                                ⚙️ {accion_banner}
-                            </div>
-                        </div>
-                        <div class="badge-semaforo-pill">
-                            Consigna: {st.session_state.temp_ideal_consigna:.1f}°C | Grano: {temp_grano:.1f}°C (Δ {delta_t:+.1f}°C)
-                        </div>
-                    </div>
-                    """, unsafe_allow_html=True)
-
-                with metrics_area:
-                    col1, col2, col3, col4 = st.columns([1, 1, 1.2, 1.3])
-                    with col1:
-                        st.metric("🌡️ Temp. Ambiente", f"{temp_amb:.1f} °C", delta=f"{temp_amb - 25.0:+.1f} vs ref")
-                    with col2:
-                        st.metric("💧 Humedad Relativa", f"{hum_amb:.1f} %", delta=f"{hum_amb - 60.0:+.1f} vs ref", delta_color="inverse")
-                    with col3:
-                        delta_grano_ideal = temp_grano - st.session_state.temp_ideal_consigna
-                        st.metric(
-                            "🌾 Temp. Grano",
-                            f"{temp_grano:.1f} °C",
-                            delta=f"{delta_grano_ideal:+.1f}°C vs ideal ({st.session_state.temp_ideal_consigna:.1f}°C)",
-                            delta_color="off" if abs(delta_grano_ideal) <= 1.0 else ("inverse" if delta_grano_ideal > 0 else "normal")
-                        )
-                    with col4:
-                        st.markdown(f"""
-                        <div class="prediction-card">
-                            <div class="prediction-title">⏱️ Tiempo Estimado Restante</div>
-                            <div class="prediction-value">{tiempo_restante:.1f}</div>
-                            <div class="prediction-unit">Horas de secado</div>
-                            <div class="prediction-badge {clase_badge}">{etiqueta_estado}</div>
-                        </div>
-                        """, unsafe_allow_html=True)
-
-                with charts_area:
-                    if not st.session_state.historial.empty:
-                        st.markdown("#### 📈 Dinámica Térmica y Cinética de Secado")
-                        df_chart = st.session_state.historial.set_index('Timestamp')
-                        c_ch1, c_ch2 = st.columns(2)
-                        with c_ch1:
-                            st.caption("Seguimiento de Lazo Cerrado (Temp. Grano vs Temp. Ideal)")
-                            cols_plot = ['Temp_Grano', 'Temp_Ideal', 'Temp_Ambiente'] if 'Temp_Ideal' in df_chart.columns else ['Temp_Grano', 'Temp_Ambiente']
-                            st.line_chart(df_chart[cols_plot], height=240)
-                        with c_ch2:
-                            st.caption("Curva de Tiempo Restante Estimado por IA (Horas)")
-                            st.line_chart(df_chart[['Tiempo_Restante_Estimado']], height=240, color="#00b4d8")
-
-                with log_area:
-                    st.text(f"[{ahora}] Datos: '{raw_line}' | Semáforo: {color_led} | Fan: {label_fan} | Predicción: {tiempo_restante:.2f} h")
-
-            except (ValueError, IndexError) as err_ruido:
-                st.session_state.lineas_corruptas += 1
-                with log_area:
-                    st.warning(f"⚠️ [Ruido eléctrico] Trama descartada: '{raw_line}'. Causa: {err_ruido}")
-                continue
-
-            except (serial.SerialException, OSError) as err_desconexion:
-                st.session_state.analisis_en_ejecucion = False
-                st.session_state.serial_conn = None
-                status_area.error(f"🔌 **Dispositivo desconectado:** Se perdió la comunicación física ({err_desconexion}).")
-                st.stop()
-
-            except Exception as e:
-                with log_area:
-                    st.error(f"Excepción inesperada: {e}")
-                time.sleep(0.05)
-
+def render_dashboard() -> None:
+    st.header("Dashboard general")
+    frame = current_frame()
+    if st.session_state.demo_mode:
+        if st.button("▶ Generar lectura simulada", type="primary"):
+            demo_reading(); st.rerun()
+        st.info("Modo demostración activo: los datos están etiquetados como simulados y no son mediciones experimentales reales.")
+    cols = st.columns(4)
+    cols[0].metric("EMQX", "Conectado" if mqtt_subscriber and mqtt_subscriber.is_connected else "No disponible")
+    cols[1].metric("Puente Python", "Activo" if mqtt_subscriber and mqtt_subscriber.is_connected else "No disponible")
+    cols[2].metric("Arduino Nano", "Telemetría recibida" if frame and not frame.get("simulado") else "No disponible")
+    cols[3].metric("Nodo", st.session_state.selected_node)
+    cols = st.columns(4)
+    cols[0].metric("Temp. ambiente", metric_value(frame.get("t_amb") if frame else None, " °C"))
+    cols[1].metric("Humedad ambiente", metric_value(frame.get("hum") if frame else None, " %"))
+    cols[2].metric("Temp. grano", metric_value(frame.get("t_grano") if frame else None, " °C"))
+    cols[3].metric("Setpoint", metric_value(frame.get("sp") if frame else None, " °C"))
+    active = None
+    if st.session_state.current_experiment_id:
+        try:
+            active = manager.get_experiment(st.session_state.current_experiment_id)
+        except KeyError:
+            active = None
+    if active:
+        st.caption(f"Corrida actual: **{active.run_code}** | Grano: {active.grain_type} | Fase: {active.phase.upper()} | Estado: {active.status}")
+    predicted = None
+    if frame:
+        try:
+            predicted = predictor.predict(float(frame["t_amb"]), float(frame["hum"]), float(frame["t_grano"]))
+        except (KeyError, TypeError, ValueError, RuntimeError):
+            predicted = None
+    elapsed = None
+    if active and active.started_at_utc:
+        try:
+            elapsed = (datetime.now(timezone.utc) - datetime.fromisoformat(active.started_at_utc.replace("Z", "+00:00"))).total_seconds() / 3600
+        except ValueError:
+            elapsed = None
+    cols = st.columns(4)
+    cols[0].metric("Ventilador", metric_value(frame.get("vent") if frame else None, " PWM"))
+    cols[1].metric("Calefactor", metric_value(frame.get("foco") if frame else None))
+    cols[2].metric("Tiempo transcurrido", metric_value(round(elapsed, 2) if elapsed is not None else None, " h"))
+    cols[3].metric("Predicción restante", metric_value(round(predicted, 2) if predicted is not None else None, " h"))
+    if frame:
+        origin = "SIMULADO" if frame.get("simulado") else "REAL"
+        st.caption(f"Origen de la última lectura: **{origin}** | Modo: {frame.get('modo', 'No disponible')} | Secuencia: {frame.get('sequence', 'No disponible')}")
+        if frame.get("t_grano", 0) > CRITICAL_GRAIN_OVERHEAT_THRESHOLD:
+            st.error("Alerta: temperatura del grano por encima del límite crítico.")
     else:
-        status_area.warning("⚠️ Análisis en pausa. Selecciona tu región de Perú y presiona **'▶ Iniciar Análisis'** para enviar la consigna y comenzar la regulación continua.")
-        if not st.session_state.historial.empty:
-            st.markdown("#### 📊 Últimos datos registrados en la sesión")
-            st.dataframe(st.session_state.historial, use_container_width=True)
+        st.info("No hay telemetría disponible.")
+    df = frame_df()
+    if not df.empty:
+        st.subheader("Telemetría en tiempo real")
+        chart = df.set_index("timestamp")
+        c1, c2 = st.columns(2)
+        c1.line_chart(chart[["t_amb", "t_grano"]].rename(columns={"t_amb": "Ambiente °C", "t_grano": "Grano °C"}))
+        c2.line_chart(chart[["hum"]].rename(columns={"hum": "Humedad %"}))
+        if "sp" in chart:
+            st.line_chart(chart[["t_grano", "sp"]].rename(columns={"t_grano": "Grano °C", "sp": "Setpoint °C"}))
 
-# ------------------------------------------------------------------------------
-# PESTAÑA 3: DIAGNÓSTICO Y ESTADO DE COMPONENTES
-# ------------------------------------------------------------------------------
-with tab_estado:
-    st.subheader("🩺 Panel de Diagnóstico Integral del Sistema")
-    st.caption("Supervisión en tiempo real del estado operativo de sensores, actuadores, bus de comunicación y motor de IA.")
 
-    # 1. ESTADO DE SENSORES
-    st.markdown("### 📡 1. Sensores de Telemetría")
-    col_s1, col_s2 = st.columns(2)
+def render_experiments() -> None:
+    st.header("Gestión de experimentos")
+    with st.form("experiment_form"):
+        c1, c2, c3 = st.columns(3)
+        run_code = c1.text_input("Código de corrida")
+        grain = c2.selectbox("Tipo de grano", [GrainType.CAFE.value, GrainType.CACAO.value])
+        phase = c3.selectbox("Fase", [ExperimentPhase.ANTES.value, ExperimentPhase.DESPUES.value])
+        batch = c1.text_input("Lote")
+        pair = c2.text_input("Pareja experimental (opcional)")
+        origin = c3.selectbox("Origen", [MeasurementOrigin.REAL.value, MeasurementOrigin.SIMULADO.value])
+        weight = c1.number_input("Peso inicial (g)", min_value=0.0, value=0.0)
+        moisture = c2.number_input("Humedad inicial (%)", min_value=0.0, max_value=100.0, value=0.0)
+        reference = c3.number_input("Referencia térmica (°C)", value=23.0)
+        actuators = st.text_input("Configuración inicial de actuadores", value="ventilador:0; calefactor:no disponible")
+        observations = st.text_area("Observaciones")
+        submitted = st.form_submit_button("Crear corrida", type="primary")
+    if submitted:
+        try:
+            experiment = manager.create_experiment(
+                grain_type=grain, phase=phase, origin=origin, thermal_reference_c=reference,
+                run_code=run_code or None, batch_id=batch or None, pair_id=pair or None,
+                initial_weight_g=weight or None, initial_moisture_percent=moisture or None,
+                actuator_config={"configuracion": actuators}, observations=observations or None,
+            )
+            st.success(f"Corrida {experiment.run_code} creada en estado preparado.")
+        except (ValueError, OSError) as error:
+            st.error(str(error))
+    experiments = manager.list_experiments()
+    if not experiments:
+        st.info("No hay corridas registradas."); return
+    options = {f"#{item.id} · {item.run_code} · {item.phase.upper()} · {item.status}": item for item in experiments}
+    selected = options[st.selectbox("Corrida", list(options))]
+    st.json({"id": selected.id, "fase": selected.phase, "origen": selected.origin, "estado": selected.status, "lote": selected.batch_id})
+    c1, c2, c3, c4 = st.columns(4)
+    if c1.button("Iniciar", disabled=selected.status != ExperimentStatus.PREPARADO.value):
+        command = "MODO:CONTROL" if selected.phase == ExperimentPhase.DESPUES.value else "MODO:MONITOREO"
+        if selected.origin == MeasurementOrigin.SIMULADO.value or st.session_state.demo_mode:
+            manager.start(selected.id); st.session_state.current_experiment_id = selected.id; st.rerun()
+        elif publish_command(command, "start", selected.id):
+            st.info("Comando enviado; la corrida iniciará cuando llegue ACK del Arduino.")
+    if c2.button("Pausar", disabled=selected.status != ExperimentStatus.EJECUTANDO.value):
+        if selected.origin == MeasurementOrigin.SIMULADO.value: manager.pause(selected.id); st.rerun()
+        else: publish_command("PARAR", "pause", selected.id)
+    if c3.button("Reanudar", disabled=selected.status != ExperimentStatus.PAUSADO.value):
+        if selected.origin == MeasurementOrigin.SIMULADO.value: manager.resume(selected.id); st.rerun()
+        else: publish_command("MODO:CONTROL" if selected.phase == ExperimentPhase.DESPUES.value else "MODO:MONITOREO", "resume", selected.id)
+    with c4.popover("Finalizar"):
+        final_weight = st.number_input("Peso final (g)", min_value=0.0, value=0.0, key="final_weight")
+        final_moisture = st.number_input("Humedad final (%)", min_value=0.0, max_value=100.0, value=0.0, key="final_moisture")
+        if st.button("Confirmar finalización"):
+            manager.finish(selected.id, final_weight or None, final_moisture or None); st.rerun()
 
-    with col_s1:
-        st.markdown(f"""
-        <div class="diag-card">
-            <div class="diag-title">
-                🌡️ Sensor DHT22 (Ambiente)
-                <span class="diag-pin">Pin D2</span>
-            </div>
-            <p><strong>Estado Operativo:</strong> <span class="diag-status-ok">{st.session_state.sensor_dht_estado}</span></p>
-            <p><strong>Última Temp. Ambiente:</strong> {f"{st.session_state.ultima_temp_amb:.1f} °C" if st.session_state.ultima_temp_amb is not None else "Sin datos"}</p>
-            <p><strong>Última Humedad Relativa:</strong> {f"{st.session_state.ultima_hum_amb:.1f} %" if st.session_state.ultima_hum_amb is not None else "Sin datos"}</p>
-            <p><strong>Rango Físico Válido:</strong> -10°C a 80°C | 0% a 100% HR</p>
-            <p class="diag-muted">Última actualización: {st.session_state.ultima_hora_lectura}</p>
-        </div>
-        """, unsafe_allow_html=True)
 
-    with col_s2:
-        es_sobrecalentado = (st.session_state.ultima_temp_grano is not None and st.session_state.ultima_temp_grano > 45.0)
-        color_ds = "diag-status-warn" if es_sobrecalentado else "diag-status-ok"
-        st.markdown(f"""
-        <div class="diag-card">
-            <div class="diag-title">
-                🌾 Sensor DS18B20 (Masa de Grano)
-                <span class="diag-pin">Pin D3 (OneWire)</span>
-            </div>
-            <p><strong>Estado Operativo:</strong> <span class="{color_ds}">{st.session_state.sensor_ds_estado}</span></p>
-            <p><strong>Última Temp. del Grano:</strong> {f"{st.session_state.ultima_temp_grano:.1f} °C" if st.session_state.ultima_temp_grano is not None else "Sin datos"}</p>
-            <p><strong>Umbral Crítico de Calidad:</strong> 45.0 °C (Preserva embrión de café/cacao)</p>
-            <p><strong>Condición Térmica:</strong> {'⚠️ ALERTA: Grano en riesgo térmico' if es_sobrecalentado else '✅ Óptima conservación'}</p>
-            <p class="diag-muted">Última actualización: {st.session_state.ultima_hora_lectura}</p>
-        </div>
-        """, unsafe_allow_html=True)
+def render_hardware() -> None:
+    st.header("Control de hardware")
+    frame = current_frame()
+    st.caption("Los comandos físicos se envían por MQTT al puente Python; Streamlit no abre el puerto serial.")
+    mode = st.selectbox("Modo", ["MONITOREO", "CONTROL"])
+    setpoint = st.number_input("Setpoint (°C)", min_value=10.0, max_value=50.0, value=float(frame.get("sp", 23.0) if frame else 23.0))
+    pwm = st.slider("PWM del ventilador", 0, 255, int(frame.get("vent", 0) or 0) if frame else 0)
+    online = mqtt_subscriber is not None and mqtt_subscriber.is_connected
+    c1, c2, c3, c4 = st.columns(4)
+    if c1.button("Aplicar modo", disabled=not online): publish_command(f"MODO:{mode}")
+    if c2.button("Aplicar setpoint", disabled=not online): publish_command(f"SP:{setpoint:.1f}")
+    if c3.button("Aplicar ventilador", disabled=not online or mode == "CONTROL"): publish_command(f"VENT:{pwm}")
+    if c4.button("PARAR", type="secondary", disabled=not online): publish_command("PARAR")
+    if st.session_state.pending_command: st.warning(f"Esperando ACK de {st.session_state.pending_command['command']}...")
+    if st.session_state.last_ack: st.json(st.session_state.last_ack)
+    st.subheader("Estado reportado")
+    st.json(frame or {"estado": "No disponible"})
+    st.subheader("Historial de comandos")
+    st.dataframe(pd.DataFrame(st.session_state.command_log).tail(20), width="stretch")
 
-    st.markdown("---")
 
-    # 2. ESTADO DE ACTUADORES Y CONTROL EN LAZO CERRADO
-    st.markdown("### ⚙️ 2. Actuadores y Etapas de Potencia (Lazo Cerrado ML)")
-    
-    # Resumen de consigna térmica activa
-    st.info(
-        f"🎯 **Consigna Térmica Activa en Arduino:** `{st.session_state.temp_ideal_consigna:.1f} °C` | "
-        f"**Región Configurada:** `{st.session_state.region_seleccionada}` | "
-        f"**Semáforo Actual:** `{st.session_state.color_semaforo_led}`"
+def render_history() -> None:
+    st.header("Historial de experimentos")
+    experiments = manager.list_experiments()
+    grain = st.selectbox("Grano", ["Todos", GrainType.CAFE.value, GrainType.CACAO.value])
+    phase = st.selectbox("Fase", ["Todos", ExperimentPhase.ANTES.value, ExperimentPhase.DESPUES.value])
+    origin = st.selectbox("Origen", ["Todos", MeasurementOrigin.REAL.value, MeasurementOrigin.SIMULADO.value])
+    devices = ["Todos"] + history_repo.devices()
+    device = st.selectbox("Dispositivo", devices)
+    batch = st.text_input("Lote", placeholder="Todos los lotes")
+    d1, d2 = st.columns(2)
+    date_from = d1.date_input("Fecha desde", value=None)
+    date_to = d2.date_input("Fecha hasta", value=None)
+    rows = history_repo.measurements(
+        grain_type=grain, phase=phase, origin=origin, node_id=device, batch_id=batch,
+        date_from=date_from.isoformat() if date_from else None,
+        date_to=date_to.isoformat() if date_to else None,
     )
+    if not rows:
+        st.info("No hay registros para los filtros seleccionados."); return
+    df = pd.DataFrame(rows)
+    st.dataframe(df, width="stretch")
+    st.download_button("Descargar mediciones CSV", df.to_csv(index=False).encode("utf-8"), "mediciones.csv", "text/csv")
+    if experiments:
+        experiment_id = st.selectbox("Consultar eventos de corrida", [row.id for row in experiments])
+        st.dataframe(pd.DataFrame(manager.list_events(experiment_id)), width="stretch")
 
-    col_a1, col_a2, col_a3 = st.columns(3)
 
-    with col_a1:
-        st.markdown(f"""
-        <div class="diag-card">
-            <div class="diag-title">🟢 LED Verde <span class="diag-pin">Pin D4</span></div>
-            <p><strong>Función en Lazo:</strong> Meta Térmica Alcanzada (±0.8°C)</p>
-            <p><strong>Estado:</strong> {'<span class="diag-status-ok">ENCENDIDO</span>' if st.session_state.estado_led_verde else '<span class="diag-status-off">Apagado</span>'}</p>
-            <p class="diag-muted">Se activa cuando el grano llega a la temperatura ideal calculada por el ML. Apaga el ventilador.</p>
-        </div>
-        """, unsafe_allow_html=True)
+def render_comparison() -> None:
+    st.header("Comparación ANTES / DESPUÉS")
+    experiments = manager.list_experiments()
+    include_simulated = st.checkbox("Incluir demostraciones simuladas", value=False)
+    if not include_simulated:
+        experiments = [item for item in experiments if item.origin == MeasurementOrigin.REAL.value]
+    antes = [item for item in experiments if item.phase == ExperimentPhase.ANTES.value]
+    despues = [item for item in experiments if item.phase == ExperimentPhase.DESPUES.value]
+    if not antes or not despues:
+        st.info("Selecciona corridas ANTES y DESPUÉS cuando existan datos suficientes. Los datos simulados no se incluyen por defecto."); return
+    a = st.selectbox("Corrida ANTES", antes, format_func=lambda x: f"{x.run_code} · {x.origin}")
+    d = st.selectbox("Corrida DESPUÉS", despues, format_func=lambda x: f"{x.run_code} · {x.origin}")
+    if a.grain_type != d.grain_type or a.thermal_reference_c != d.thermal_reference_c or a.completion_criterion != d.completion_criterion:
+        st.error("Las corridas no tienen criterios equivalentes, grano común o referencia térmica común; no se calcula la comparación.")
+        return
+    all_summaries = []
+    for experiment in experiments:
+        all_summaries.append({"run_code": experiment.run_code, "grain_type": experiment.grain_type, "batch_id": experiment.batch_id, "pair_id": experiment.pair_id, "phase": experiment.phase, "origin": experiment.origin, "date": experiment.created_at_utc, "status": experiment.status, **calculate_experiment_indicators(experiment, history_repo.measurements(experiment_id=experiment.id))})
+    all_summary_df = pd.DataFrame(all_summaries)
+    st.subheader("Resumen de corridas")
+    st.dataframe(all_summary_df, width="stretch")
+    selected = [a, d]
+    summaries = []
+    measurement_rows = []
+    for experiment in selected:
+        measurements = history_repo.measurements(experiment_id=experiment.id)
+        measurement_rows.extend(measurements)
+        indicator = calculate_experiment_indicators(experiment, measurements)
+        summaries.append({"run_code": experiment.run_code, "grain_type": experiment.grain_type, "batch_id": experiment.batch_id, "pair_id": experiment.pair_id, "phase": experiment.phase, "origin": experiment.origin, "date": experiment.created_at_utc, "status": experiment.status, **indicator})
+    summary_df = pd.DataFrame(summaries)
+    display_columns = ["run_code", "grain_type", "batch_id", "phase", "origin", "date", "duration_hours", "thermal_mae_c", "time_in_range_percent", "mass_loss_percent", "ambient_humidity_mean_percent", "grain_temperature_mean_c", "energy_kwh", "status"]
+    st.subheader("Indicadores por corrida")
+    st.dataframe(summary_df[[column for column in display_columns if column in summary_df]], width="stretch")
+    metrics = ["duration_hours", "thermal_mae_c", "time_in_range_percent", "mass_loss_percent", "ambient_humidity_mean_percent", "grain_temperature_mean_c", "energy_kwh"]
+    paired = bool(a.pair_id and d.pair_id and a.pair_id == d.pair_id)
+    st.caption(f"Diseño detectado: **{'pareado por pair_id' if paired else 'independiente'}**. El orden de filas no se utiliza para emparejar.")
+    comparisons = [compare_experiments(summaries, metric, paired=paired) for metric in metrics]
+    comparison_df = pd.DataFrame([{"indicador": item["metric"], "n_antes": item["before"]["n"], "media_antes": item["before"]["mean"], "mediana_antes": item["before"]["median"], "desv_antes": item["before"]["std"], "n_despues": item["after"]["n"], "media_despues": item["after"]["mean"], "mediana_despues": item["after"]["median"], "desv_despues": item["after"]["std"], "diferencia": item["difference"], "cambio_pct": item["percent_change"], "direccion": item["direction"]} for item in comparisons])
+    st.subheader("Comparación descriptiva")
+    st.dataframe(comparison_df, width="stretch")
+    test_rows = []
+    for metric in metrics:
+        before_values = [row[metric] for row in summaries if row["phase"] == "antes" and row.get(metric) is not None]
+        after_values = [row[metric] for row in summaries if row["phase"] == "despues" and row.get(metric) is not None]
+        result = statistical_tests(before_values, after_values, paired=paired)
+        test_rows.append({"indicador": metric, "prueba": result.get("test") or "No disponible", "p_valor": result.get("p_value"), "shapiro_p": (result.get("shapiro") or {}).get("p_value"), "wilcoxon_p": (result.get("wilcoxon") or {}).get("p_value"), "limitación": result.get("limitation") or ""})
+    tests_df = pd.DataFrame(test_rows)
+    st.subheader("Pruebas estadísticas")
+    st.dataframe(tests_df, width="stretch")
+    st.download_button("Descargar tabla estadística CSV", dataframe_csv(tests_df), "pruebas_estadisticas.csv", "text/csv")
+    st.caption("Las pruebas se reportan como apoyo inferencial. No se afirma mejora solo por un p-valor; deben evaluarse magnitud, dirección, supuestos y relevancia práctica.")
+    if measurement_rows:
+        df = pd.DataFrame(measurement_rows)
+        chart = df.pivot_table(index="timestamp_utc", columns="run_code", values="grain_temperature_c", aggfunc="mean")
+        st.subheader("Evolución de temperatura del grano")
+        st.line_chart(chart)
+        try:
+            st.download_button("Descargar gráfico de temperatura del grano", line_chart_png(chart, "Temperatura del grano"), "temperatura_grano.png", "image/png")
+        except (ImportError, ModuleNotFoundError):
+            st.caption("Exportación PNG no disponible: falta matplotlib")
+        ambient = df.pivot_table(index="timestamp_utc", columns="run_code", values="ambient_temperature_c", aggfunc="mean")
+        st.subheader("Evolución de temperatura ambiental")
+        st.line_chart(ambient)
+        target = df.pivot_table(index="timestamp_utc", columns="run_code", values="reference_temperature_c", aggfunc="mean")
+        if not target.empty:
+            st.subheader("Referencia térmica vs. temperatura real")
+            st.line_chart(pd.concat({"grano": chart, "referencia": target}, axis=1))
+    c1, c2, c3 = st.columns(3)
+    c1.download_button("CSV de indicadores", dataframe_csv(summary_df), "resumen_corridas.csv", "text/csv")
+    try:
+        excel = dataframe_excel(summary_df, "indicadores")
+        c2.download_button("Excel de indicadores", excel, "resumen_corridas.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    except (ImportError, ModuleNotFoundError):
+        c2.caption("Excel no disponible: falta openpyxl")
+    try:
+        pdf = comparison_pdf("Informe ANTES / DESPUÉS", summary_df, tests_df, a.grain_type, "simulado" if include_simulated else "real")
+        c3.download_button("Informe PDF", pdf, "informe_experimental.pdf", "application/pdf")
+    except (ImportError, ModuleNotFoundError):
+        c3.caption("PDF no disponible: falta reportlab")
 
-    with col_a2:
-        st.markdown(f"""
-        <div class="diag-card">
-            <div class="diag-title">🟡 LED Amarillo <span class="diag-pin">Pin D6</span></div>
-            <p><strong>Función en Lazo:</strong> En Camino a la Ideal (0.8°C a 2.2°C)</p>
-            <p><strong>Estado:</strong> {'<span class="diag-status-warn">ENCENDIDO</span>' if st.session_state.estado_led_amarillo else '<span class="diag-status-off">Apagado</span>'}</p>
-            <p class="diag-muted">Aproximación progresiva. El ventilador modula al 60% PWM (153) para estabilización suave.</p>
-        </div>
-        """, unsafe_allow_html=True)
 
-    with col_a3:
-        st.markdown(f"""
-        <div class="diag-card">
-            <div class="diag-title">🔴 LED Rojo <span class="diag-pin">Pin D5</span></div>
-            <p><strong>Función en Lazo:</strong> Falta Mucho / Desviación (>2.2°C)</p>
-            <p><strong>Estado:</strong> {'<span class="diag-status-err">ENCENDIDO</span>' if st.session_state.estado_led_rojo else '<span class="diag-status-off">Apagado</span>'}</p>
-            <p class="diag-muted">Diferencia térmica amplia. El ventilador opera al 100% PWM (255) a máxima potencia.</p>
-        </div>
-        """, unsafe_allow_html=True)
+def render_diagnostics() -> None:
+    st.header("Inteligencia artificial y diagnóstico")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Modelo", "Random Forest Regressor")
+    c2.metric("Variable predicha", "Tiempo restante")
+    c3.metric("Registros de entrenamiento", str(model_eval.samples_count) if model_eval.samples_count else "No disponible")
+    st.info("El modelo predice tiempo restante de secado; no predice temperatura ideal ni sustituye la consigna del firmware.")
+    st.write({"archivo": str(MODEL_PATH), "entradas": list(model_eval.feature_columns), "objetivo": model_eval.target_column, "origen_dataset": model_eval.dataset_origin, "MAE (h)": model_eval.mae_hours or "No disponible", "R²": model_eval.r2_score or "No disponible", "división": model_eval.split_strategy})
+    st.warning("El dataset inicial puede ser sintético. Verifica su origen antes de usar resultados para conclusiones experimentales.")
+    st.subheader("Comunicación y sensores")
+    st.write({"EMQX": "conectado" if mqtt_subscriber and mqtt_subscriber.is_connected else "No disponible", "último ACK": st.session_state.last_ack or "No disponible", "último estado": st.session_state.last_state or "No disponible", "errores": st.session_state.last_error or "No disponible", "mensajes inválidos": st.session_state.invalid_messages})
 
-    col_a4, col_a5 = st.columns(2)
 
-    with col_a4:
-        st.markdown(f"""
-        <div class="diag-card">
-            <div class="diag-title">💨 Ventilador de Convección <span class="diag-pin">Pin D9 PWM</span></div>
-            <p><strong>Régimen Actual:</strong> <span class="diag-status-ok">{st.session_state.estado_ventilador}</span></p>
-            <p><strong>Consigna de Regulación:</strong> <code>T:{st.session_state.temp_ideal_consigna:.1f}°C</code></p>
-            <p class="diag-muted">Se apaga al alcanzar la temperatura ideal (Verde). Se reactiva automáticamente si la temperatura se desvía.</p>
-        </div>
-        """, unsafe_allow_html=True)
-
-    with col_a5:
-        st.markdown(f"""
-        <div class="diag-card">
-            <div class="diag-title">📟 Pantalla LCD 16x2 <span class="diag-pin">Pines A4 (SDA) / A5 (SCL) I2C</span></div>
-            <p><strong>Línea 1 Telemetría:</strong> <code>A:&lt;TempAmb&gt; H:&lt;HumAmb&gt;</code></p>
-            <p><strong>Línea 2 Telemetría:</strong> <code>G:&lt;TempGrano&gt; Id:&lt;TempIdeal&gt;</code></p>
-            <p class="diag-muted">Muestra en tiempo real Temperatura Ambiente, Humedad, Grano y la Consigna Ideal fijada por ML.</p>
-        </div>
-        """, unsafe_allow_html=True)
-
-    st.markdown("---")
-
-    # 3. ENLACE DE COMUNICACIONES Y MACHINE LEARNING
-    st.markdown("### 🔌 3. Canal de Comunicación y Motor IA")
-    col_c1, col_c2 = st.columns(2)
-
-    with col_c1:
-        total_recibidas = len(st.session_state.historial) + st.session_state.lineas_corruptas
-        tasa_integridad = (len(st.session_state.historial) / total_recibidas * 100) if total_recibidas > 0 else 100.0
-        st.markdown(f"""
-        <div class="diag-card">
-            <div class="diag-title">🔌 Enlace Serial / Gateway</div>
-            <p><strong>Puerto Seleccionado:</strong> <code>{st.session_state.puerto_actual or puerto_seleccionado}</code></p>
-            <p><strong>Velocidad de Transmisión:</strong> {baud_rate} Baudios</p>
-            <p><strong>Lecturas Válidas Procesadas:</strong> {len(st.session_state.historial)}</p>
-            <p><strong>Tramas Descartadas (Ruido eléctrico):</strong> {st.session_state.lineas_corruptas}</p>
-            <p><strong>Tasa de Integridad de Señal:</strong> {tasa_integridad:.1f}%</p>
-        </div>
-        """, unsafe_allow_html=True)
-
-    with col_c2:
-        st.markdown(f"""
-        <div class="diag-card">
-            <div class="diag-title">🤖 Motor de Inferencia Machine Learning</div>
-            <p><strong>Algoritmo:</strong> Random Forest Regressor (Scikit-Learn)</p>
-            <p><strong>Variables de Entrada:</strong> <code>Temp_Ambiente</code>, <code>Humedad_Ambiente</code>, <code>Temp_Grano</code></p>
-            <p><strong>Variable Objetivo:</strong> <code>Tiempo_Restante_Horas</code></p>
-            <p><strong>Precisión ($R^2$ Score):</strong> {f"{info_modelo['r2']:.3f}" if info_modelo.get('r2') is not None else "N/A"}</p>
-            <p><strong>Error Medio Absoluto (MAE):</strong> {f"{info_modelo['mae']:.2f} horas" if info_modelo.get('mae') is not None else "N/A"}</p>
-        </div>
-        """, unsafe_allow_html=True)
-
-# ==============================================================================
-# 6. PIE DE PÁGINA
-# ==============================================================================
-st.markdown("---")
-col_f1, col_f2, col_f3 = st.columns(3)
-col_f1.caption(f"Lecturas registradas: **{len(st.session_state.historial)}**")
-col_f2.caption(f"Tramas con ruido descartadas: **{st.session_state.lineas_corruptas}**")
-col_f3.caption("IoT Gateway Bidireccional | Diagnóstico de Componentes & ML")
+init_state()
+poll_mqtt()
+render_sidebar()
+render_header()
+if st.session_state.page == "Dashboard general": render_dashboard()
+elif st.session_state.page == "Gestión de experimentos": render_experiments()
+elif st.session_state.page == "Control de hardware": render_hardware()
+elif st.session_state.page == "Historial": render_history()
+elif st.session_state.page == "Comparación ANTES/DESPUÉS": render_comparison()
+else: render_diagnostics()
+render_footer(len(st.session_state.telemetry), st.session_state.invalid_messages)

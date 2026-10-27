@@ -39,6 +39,13 @@ def test_predict_ideal_temperature_san_martin_vs_cajamarca():
     assert temp_caj <= 23.5
 
 
+def test_predict_ideal_temperature_la_libertad():
+    """Valida la predicción de temperatura ideal para La Libertad (Pataz / Otuzco / Bolívar)."""
+    # En condiciones base típicas (humedad 68%, temperatura 25°C), debe ser exactamente la temperatura base (23.0°C)
+    temp_libertad = predict_ideal_temperature("La Libertad (Pataz / Otuzco / Bolívar)", hum_ambiente=68.0, temp_ambiente=25.0)
+    assert temp_libertad == 23.0
+
+
 def test_evaluate_thermal_state_green_target_reached():
     """Valida el encendido de LED Verde y apagado de ventilador cuando se alcanza la temperatura ideal (±0.8°C)."""
     ideal = 23.0  # Escala prototipo para demostración en vivo

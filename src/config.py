@@ -20,6 +20,7 @@ MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
 DATASET_PATH: Path = DATA_DIR / "dataset_secado_cafe.csv"
 MODEL_PATH: Path = MODELS_DIR / "modelo_secado.pkl"
+EXPERIMENTS_DB_PATH: Path = DATA_DIR / "experimentos.db"
 
 # ==============================================================================
 # PARÁMETROS DE HARDWARE Y COMUNICACIÓN SERIAL
@@ -67,6 +68,15 @@ UMBRAL_CERCA_TEMP: float = 2.2      # <= 2.2°C: Amarillo, Fan 60%
 # PERFILES CLIMÁTICOS DE REGIONES PRODUCTORAS DE PERÚ (CALIBRADOS PARA PROTOTIPO)
 # ==============================================================================
 PERU_REGIONS_DATA = {
+    "La Libertad (Pataz / Otuzco / Bolívar)": {
+        "departamento": "La Libertad",
+        "zona": "Sierra y Valles Interandinos (Pataz / Otuzco / Bolívar)",
+        "precipitacion_anual_mm": 950,
+        "riesgo_humedad": "Moderado (Lluvias estacionales en sierra y neblina en valles)",
+        "humedad_tipica": 68.0,
+        "temp_base_ideal": 23.0,  # Escala prototipo (-15°C de 38.0°C real)
+        "descripcion": "Valles interandinos y cuenca del Marañón en La Libertad (provincias de Pataz, Otuzco y Bolívar). Clima templado interandino con lluvias estacionales, optimizado para secado homogéneo y preservación aromática."
+    },
     "San Martín (Moyobamba / Tarapoto)": {
         "departamento": "San Martín",
         "zona": "Selva Alta",
@@ -131,4 +141,3 @@ PERU_REGIONS_DATA = {
         "descripcion": "Zona de cafés premiados mundialmente. Consigna prototipo calibrada a 22.5°C."
     }
 }
-

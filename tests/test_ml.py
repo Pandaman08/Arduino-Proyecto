@@ -5,6 +5,7 @@ Valida entrenamiento, inferencia, consistencia y alertas agroindustriales.
 
 from pathlib import Path
 import pytest
+import pandas as pd
 from src.ml.model_manager import (
     DryingPredictor,
     create_synthetic_dataset,
@@ -61,3 +62,13 @@ def test_drying_stage_evaluation():
     msg, badge = DryingPredictor.get_drying_stage_info(remaining_hours=5.0, grain_temp=35.0)
     assert "Fase 3" in msg
     assert badge == "status-final"
+
+
+def test_real_training_path_uses_run_groups(tmp_path: Path):
+    predictor = DryingPredictor(model_path=tmp_path / "real.pkl", dataset_path=tmp_path / "unused.csv")
+    rows = []
+    for run_id, offset in [("R1", 0.0), ("R2", 1.0), ("R3", 2.0), ("R4", 3.0)]:
+        rows.append({"run_id": run_id, "Temp_Ambiente": 24.0 + offset, "Humedad_Ambiente": 60.0, "Temp_Grano": 28.0 + offset, "Tiempo_Restante_Horas": 10.0 - offset})
+    evaluation = predictor.train_from_labeled_runs(pd.DataFrame(rows))
+    assert evaluation.split_strategy == "GroupShuffleSplit por run_id"
+    assert predictor.is_loaded()
