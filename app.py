@@ -7,6 +7,7 @@ Arduino y esta interfaz consume MQTT o ejecuta una demostración explícita.
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
+import os
 
 import pandas as pd
 import streamlit as st
@@ -22,6 +23,7 @@ from src.persistence import (
 )
 from src.mqtt.streamlit_adapter import create_optional_streamlit_subscriber
 from src.services.monitoring import TelemetryProcessor
+from src.services.bridge_process import BridgeProcessManager
 from src.ui import CUSTOM_CSS, render_footer, render_header
 
 
@@ -44,11 +46,17 @@ def get_mqtt():
     return create_optional_streamlit_subscriber()
 
 
+@st.cache_resource(show_spinner=False)
+def get_bridge_manager():
+    return BridgeProcessManager()
+
+
 database = get_database()
 manager = ExperimentManager(database)
 history_repo = HistoryRepository(database)
 predictor, model_eval = get_predictor()
 mqtt_subscriber, mqtt_status = get_mqtt()
+bridge_manager = get_bridge_manager()
 processor = TelemetryProcessor(predictor)
 
 
@@ -162,10 +170,27 @@ def render_sidebar() -> None:
     ], key="page")
     st.sidebar.divider()
     st.sidebar.selectbox("Nodo", ["secador_01", "secador_02", "secador_03", "secador_04", "secador_05", "sim1", "sim2", "sim3", "sim4"], key="selected_node")
+    st.sidebar.text_input("Puerto serial del puente", value=os.getenv("SERIAL_PORT", "/dev/ttyUSB0"), key="bridge_port")
+    st.sidebar.number_input("Baudios", min_value=1200, max_value=115200, value=9600, step=1200, key="bridge_baudrate")
     st.sidebar.checkbox("Modo demostración (datos simulados)", key="demo_mode")
     mqtt_online = bool(mqtt_subscriber and mqtt_subscriber.is_connected)
     st.sidebar.markdown(f"**EMQX:** {'🟢 Conectado' if mqtt_online else '🔴 No disponible'}")
     st.sidebar.caption(mqtt_status if mqtt_subscriber is not None else "Deshabilitado por configuración")
+    st.sidebar.markdown(f"**Puente Serial/MQTT:** {bridge_manager.status()}")
+    if bridge_manager.running:
+        if st.sidebar.button("⏹ Detener puente", use_container_width=True):
+            bridge_manager.stop()
+            st.rerun()
+    else:
+        if st.sidebar.button("▶ Iniciar puente", type="primary", use_container_width=True):
+            selected_node = st.session_state.selected_node
+            if selected_node.startswith("sim"):
+                st.sidebar.error("Selecciona un nodo físico para iniciar el puente serial.")
+            elif bridge_manager.start(st.session_state.bridge_port, selected_node, int(st.session_state.bridge_baudrate)):
+                st.sidebar.success("Puente iniciado")
+            else:
+                st.sidebar.error(f"No se pudo iniciar el puente: {bridge_manager.last_error}")
+            st.rerun()
     if st.sidebar.button("Actualizar", width="stretch"):
         st.rerun()
 
@@ -179,7 +204,7 @@ def render_dashboard() -> None:
         st.info("Modo demostración activo: los datos están etiquetados como simulados y no son mediciones experimentales reales.")
     cols = st.columns(4)
     cols[0].metric("EMQX", "Conectado" if mqtt_subscriber and mqtt_subscriber.is_connected else "No disponible")
-    cols[1].metric("Puente Python", "Activo" if mqtt_subscriber and mqtt_subscriber.is_connected else "No disponible")
+    cols[1].metric("Puente Python", "Activo" if bridge_manager.running else "Detenido")
     cols[2].metric("Arduino Nano", "Telemetría recibida" if frame and not frame.get("simulado") else "No disponible")
     cols[3].metric("Nodo", st.session_state.selected_node)
     cols = st.columns(4)

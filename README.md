@@ -105,8 +105,12 @@ La aplicación abrirá automáticamente el navegador en `http://localhost:8501`.
 
 ### Streamlit, MQTT y demostración
 
-La interfaz no abre directamente el puerto del Arduino. Para control físico,
-ejecuta el puente en otro proceso y configura `MQTT_STREAMLIT_ENABLED=true`.
+La interfaz no abre directamente el puerto del Arduino. En la barra lateral,
+selecciona un nodo físico, confirma el puerto y los baudios, y pulsa
+**Iniciar puente**. Streamlit lanza y detiene el proceso Serial ↔ MQTT; así el
+puerto queda reservado por un único proceso. El botón no inicia nodos
+simulados ni sustituye al registrador SQLite (`recorder_cli`). Configura
+`MQTT_STREAMLIT_ENABLED=true` para recibir telemetría desde EMQX.
 Sin MQTT, activa **Modo demostración** en la barra lateral: los datos se marcan
 como simulados y no se mezclan con mediciones reales.
 
@@ -201,6 +205,7 @@ cp .env.example .env
 # Editar .env y completar credenciales de aplicación si EMQX las requiere
 
 streamlit run app.py
+# Alternativa manual al botón de Streamlit:
 python -m src.mqtt.bridge_cli --port /dev/ttyUSB0 --node-id secador_01
 python -m src.mqtt.recorder_cli --experiment-id ID --node-id secador_01
 python -m src.mqtt.virtual_nodes_cli --interval 2
@@ -215,6 +220,7 @@ Copy-Item .env.example .env
 # Editar .env y completar credenciales de aplicación si EMQX las requiere
 
 streamlit run app.py
+# Alternativa manual al botón de Streamlit:
 python -m src.mqtt.bridge_cli --port COM3 --node-id secador_01
 python -m src.mqtt.recorder_cli --experiment-id ID --node-id secador_01
 python -m src.mqtt.virtual_nodes_cli --interval 2
