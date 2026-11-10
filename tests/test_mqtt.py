@@ -274,7 +274,8 @@ def test_bridge_rejects_retained_and_deduplicates_request_id():
     assert serial_port.sent == []
     bridge._on_command(bridge.topics.command, payload, 1, False)
     bridge._on_command(bridge.topics.command, payload, 1, False)
-    assert serial_port.sent == ['SP:30']
+    assert len(serial_port.sent) == 1
+    assert serial_port.sent[0].startswith('REQ,') and serial_port.sent[0].endswith(',SP:30')
     assert json.loads(mqtt.published[-1][1])['accepted'] is False
 
 
@@ -285,3 +286,126 @@ def test_bridge_does_not_invent_firmware_request_correlation():
     bridge.run_once()
     assert json.loads(mqtt.published[0][1])['request_id'] == 'mobile-unique'
     assert 'request_id' not in json.loads(mqtt.published[-1][1])
+
+
+def test_streamlit_connection_recovers_after_initial_failure_without_caching_none():
+    from src.mqtt.streamlit_adapter import StreamlitMqttConnection
+    now = [0.0]
+    online = StreamlitMqttSubscriber(FakeMqtt())
+    results = iter([(None, 'Error de conexión MQTT'), (online, 'conectado')])
+    calls = []
+    def factory():
+        calls.append(True)
+        return next(results)
+    connection = StreamlitMqttConnection(factory=factory, clock=lambda: now[0])
+    assert connection.get()[0] is None
+    assert connection.get()[0] is None
+    assert len(calls) == 1
+    now[0] = 5.0
+    assert connection.get()[0] is online
+    assert connection.get()[0] is online
+    assert len(calls) == 2
+
+
+def test_streamlit_reconnect_stops_old_client_and_reloads_config(monkeypatch):
+    import src.mqtt.streamlit_adapter as adapter
+    reloads = []
+    monkeypatch.setattr(adapter, 'load_dotenv', lambda **kwargs: reloads.append(kwargs))
+    first = StreamlitMqttSubscriber(FakeMqtt())
+    second = StreamlitMqttSubscriber(FakeMqtt())
+    results = iter([(first, 'conectado'), (second, 'conectado')])
+    connection = adapter.StreamlitMqttConnection(factory=lambda: next(results))
+    assert connection.get()[0] is first
+    assert connection.get(force=True)[0] is second
+    assert first.is_connected is False
+    assert reloads == [{'override': True}]
+
+
+def test_dotenv_reload_requires_explicit_override(tmp_path, monkeypatch):
+    from src.mqtt.config import load_dotenv
+    monkeypatch.setenv('LAB11_TEST_VALUE', 'externo')
+    path = tmp_path / '.env'
+    path.write_text('LAB11_TEST_VALUE=local\n', encoding='utf-8')
+    load_dotenv(path)
+    import os
+    assert os.environ['LAB11_TEST_VALUE'] == 'externo'
+    load_dotenv(path, override=True)
+    assert os.environ['LAB11_TEST_VALUE'] == 'local'
+
+
+@pytest.mark.parametrize('cause, expected', [
+    (ModuleNotFoundError("No module named 'paho'"), 'paho-mqtt'),
+    (__import__('socket').gaierror(-2, 'secret-password'), 'DNS'),
+    (__import__('ssl').SSLCertVerificationError(1, 'secret-password'), 'certificado TLS'),
+    (TimeoutError('secret-password'), 'Tiempo agotado'),
+    (ConnectionRefusedError('secret-password'), 'rechazó la conexión de red'),
+    (PermissionError('secret-password'), 'permisos'),
+])
+def test_mqtt_diagnostic_explains_cause_without_exposing_secrets(cause, expected):
+    from src.mqtt.streamlit_adapter import connection_error_message
+    error = MqttConnectionError('secret-password')
+    error.__cause__ = cause
+    message = connection_error_message(error)
+    assert expected in message
+    assert 'secret-password' not in message
+
+
+def test_mqtt_diagnostic_distinguishes_broker_authentication_rejection():
+    from src.mqtt.streamlit_adapter import connection_error_message
+    message = connection_error_message(MqttConnectionError('EMQX rechazó la conexión; código=5'))
+    assert 'autenticación' in message
+
+
+def test_bridge_correlates_out_of_order_firmware_ack_and_never_guesses_legacy_ack():
+    mqtt, port = FakeMqtt(), FakeSerial([])
+    bridge = SerialMqttBridge(port, mqtt, 'secador_01')
+    for request_id, command in [('mobile1', 'MODO:CONTROL'), ('web2', 'SP:30')]:
+        bridge._on_command(bridge.topics.command, json.dumps({'command': command, 'request_id': request_id}).encode(), 1, False)
+    first, second = [line.split(',')[1] for line in port.sent]
+    bridge._publish_serial_ack(f'ACK:SP_APLICADO_CONTROL|request_id={second}')
+    ack = json.loads(mqtt.published[-1][1])
+    assert (ack['request_id'], ack['command'], ack['source'], ack['phase'], ack['correlated']) == ('web2', 'SP:30', 'firmware', 'applied', True)
+    bridge._publish_serial_ack('ERR:SENSOR_DHT', accepted=False)
+    assert 'request_id' not in json.loads(mqtt.published[-1][1])
+    bridge._publish_serial_ack(f'ACK:MODO_CONTROL_APLICADO|request_id={first}')
+    assert json.loads(mqtt.published[-1][1])['request_id'] == 'mobile1'
+    bridge._publish_serial_ack(f'ACK:MODO_CONTROL_APLICADO|request_id={first}')
+    assert json.loads(mqtt.published[-1][1])['correlated'] is False
+
+
+def test_bridge_correlated_err_status_and_expired_id(monkeypatch):
+    import src.mqtt.bridge as module
+    clock = [0.0]
+    monkeypatch.setattr(module, 'monotonic', lambda: clock[0])
+    mqtt, port = FakeMqtt(), FakeSerial([])
+    bridge = SerialMqttBridge(port, mqtt, 'secador_01')
+    bridge._on_command(bridge.topics.command, b'{"command":"VENT:100","request_id":"fan-request"}', 1, False)
+    wire = port.sent[-1].split(',')[1]
+    bridge._publish_serial_ack(f'ERR:VENT_SOLO_MONITOREO|request_id={wire}', accepted=False)
+    ack = json.loads(mqtt.published[-1][1])
+    assert ack['accepted'] is False and ack['request_id'] == 'fan-request' and ack['correlated'] is True
+    bridge._on_command(bridge.topics.command, b'{"command":"ESTADO","request_id":"status-request"}', 1, False)
+    wire = port.sent[-1].split(',')[1]
+    bridge._publish_serial_ack(f'ACK:ESTADO_CONSULTADO|request_id={wire}')
+    assert json.loads(mqtt.published[-1][1])['request_id'] == 'status-request'
+    bridge._on_command(bridge.topics.command, b'{"command":"SP:30","request_id":"late-request"}', 1, False)
+    wire = port.sent[-1].split(',')[1]
+    clock[0] = 31.0
+    bridge._publish_serial_ack(f'ACK:SP_APLICADO_CONTROL|request_id={wire}')
+    assert 'request_id' not in json.loads(mqtt.published[-1][1])
+
+
+def test_mqtt_response_published_in_callback_does_not_block_network_thread():
+    from types import SimpleNamespace
+    from src.mqtt.client import MqttClient
+    waits = []
+    result = SimpleNamespace(rc=0, wait_for_publish=lambda **kwargs: waits.append(True))
+    client = MqttClient(MqttSettings())
+    client._client = SimpleNamespace(publish=lambda *args, **kwargs: result,
+                                    subscribe=lambda *args, **kwargs: (0, 1))
+    client._connected.set()
+    client.subscribe('secado/secador_01/cmd', lambda *_: client.publish('secado/secador_01/ack', '{}'))
+    client._on_message(None, None, SimpleNamespace(topic='secado/secador_01/cmd', payload=b'ESTADO', qos=1, retain=False))
+    assert waits == []
+    client.publish('secado/secador_01/ack', '{}')
+    assert waits == [True]

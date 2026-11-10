@@ -1,0 +1,139 @@
+{
+  "username": "secado_operador",
+  "rules": [
+    {
+      "permission": "allow",
+      "action": "publish",
+      "topic": "secado/secador_01/cmd",
+      "qos": [
+        1
+      ],
+      "retain": false
+    },
+    {
+      "permission": "allow",
+      "action": "subscribe",
+      "topic": "secado/secador_01/telemetria",
+      "qos": [
+        1
+      ]
+    },
+    {
+      "permission": "allow",
+      "action": "subscribe",
+      "topic": "secado/secador_01/estado",
+      "qos": [
+        1
+      ]
+    },
+    {
+      "permission": "allow",
+      "action": "subscribe",
+      "topic": "secado/secador_01/ack",
+      "qos": [
+        1
+      ]
+    },
+    {
+      "permission": "allow",
+      "action": "subscribe",
+      "topic": "secado/sim1/telemetria",
+      "qos": [
+        1
+      ]
+    },
+    {
+      "permission": "allow",
+      "action": "subscribe",
+      "topic": "secado/sim1/estado",
+      "qos": [
+        1
+      ]
+    },
+    {
+      "permission": "allow",
+      "action": "subscribe",
+      "topic": "secado/sim1/ack",
+      "qos": [
+        1
+      ]
+    },
+    {
+      "permission": "allow",
+      "action": "subscribe",
+      "topic": "secado/sim2/telemetria",
+      "qos": [
+        1
+      ]
+    },
+    {
+      "permission": "allow",
+      "action": "subscribe",
+      "topic": "secado/sim2/estado",
+      "qos": [
+        1
+      ]
+    },
+    {
+      "permission": "allow",
+      "action": "subscribe",
+      "topic": "secado/sim2/ack",
+      "qos": [
+        1
+      ]
+    },
+    {
+      "permission": "allow",
+      "action": "subscribe",
+      "topic": "secado/sim3/telemetria",
+      "qos": [
+        1
+      ]
+    },
+    {
+      "permission": "allow",
+      "action": "subscribe",
+      "topic": "secado/sim3/estado",
+      "qos": [
+        1
+      ]
+    },
+    {
+      "permission": "allow",
+      "action": "subscribe",
+      "topic": "secado/sim3/ack",
+      "qos": [
+        1
+      ]
+    },
+    {
+      "permission": "allow",
+      "action": "subscribe",
+      "topic": "secado/sim4/telemetria",
+      "qos": [
+        1
+      ]
+    },
+    {
+      "permission": "allow",
+      "action": "subscribe",
+      "topic": "secado/sim4/estado",
+      "qos": [
+        1
+      ]
+    },
+    {
+      "permission": "allow",
+      "action": "subscribe",
+      "topic": "secado/sim4/ack",
+      "qos": [
+        1
+      ]
+    },
+    {
+      "permission": "deny",
+      "action": "all",
+      "topic": "#"
+    }
+  ]
+}

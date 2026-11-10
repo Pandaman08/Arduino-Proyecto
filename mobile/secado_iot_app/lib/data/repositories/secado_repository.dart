@@ -22,6 +22,7 @@ class SecadoRepository extends ChangeNotifier {
   final List<StreamSubscription<dynamic>> _listeners = [];
   final Map<String, List<Telemetry>> _history = {};
   final Map<String, DateTime> _liveReceived = {};
+  final Map<String, DateTime> _deviceResponses = {};
   final Map<String, String> nodeStates = {};
   final Set<String> subscribed = {};
   final List<LocalEvent> _events = [];
@@ -95,6 +96,8 @@ class SecadoRepository extends ChangeNotifier {
             ].every((s) => subscribed.contains(AppConfig.topic(node, s))),
         fresh: fresh,
         busy: busy,
+        deviceResponsive: _deviceResponses[node] != null &&
+            now().difference(_deviceResponses[node]!) <= AppConfig.staleAfter,
       );
 
   void selectNode(String value) {
@@ -198,6 +201,7 @@ class SecadoRepository extends ChangeNotifier {
     connected = false;
     controlEnabled = false;
     _liveReceived.clear();
+    _deviceResponses.clear();
     subscribed.clear();
     status = 'Comunicación perdida';
     _failPending('Resultado desconocido tras desconexión; no se reenvía');
@@ -215,6 +219,7 @@ class SecadoRepository extends ChangeNotifier {
     controlEnabled = false;
     subscribed.clear();
     _liveReceived.clear();
+    _deviceResponses.clear();
     _failPending('Desconectado; resultado desconocido');
     await transport.disconnect();
     status = 'Desconectado';
@@ -309,6 +314,8 @@ class SecadoRepository extends ChangeNotifier {
       'ACK:SP_APLICADO_CONTROL',
       'ACK:VENT_FIJO_APLICADO',
       'ACK:LCD_APLICADO',
+      'ACK:ESTADO_CONSULTADO',
+      'ERR:REQUEST_ID_INVALIDO',
       'ERR:SP_FUERA_DE_RANGO',
       'ERR:VENT_SOLO_MONITOREO',
       'ERR:VENT_FUERA_DE_RANGO',
@@ -335,10 +342,17 @@ class SecadoRepository extends ChangeNotifier {
     }
     final text = data['message'] as String;
     final firmware = text.startsWith('ACK:') || text.startsWith('ERR:');
+    final correlated =
+        firmware && data['source'] == 'firmware' && data['correlated'] == true;
+    if (firmware &&
+        ((text.startsWith('ACK:') && data['accepted'] != true) ||
+            (text.startsWith('ERR:') && data['accepted'] != false))) {
+      throw const FormatException('Confirmación inconsistente');
+    }
     event(
       '${firmware ? 'Firmware' : 'Puente'} · $n',
       firmware
-          ? '${_safeText(text)} · sin correlación garantizada'
+          ? '${_safeText(text)} · ${correlated ? 'respuesta correlacionada' : 'sin correlación garantizada'}'
           : 'Respuesta de envío del puente',
       critical: data['accepted'] == false,
     );
@@ -348,16 +362,27 @@ class SecadoRepository extends ChangeNotifier {
     );
     if (matching.isEmpty) return;
     final command = matching.first;
+    if (firmware && (!correlated || data['command'] != command.command)) {
+      return;
+    }
     if (data['accepted'] == false) {
       command.stage = CommandStage.rejected;
       command.detail = 'Rechazado por ${firmware ? 'firmware' : 'puente'}';
+    } else if (correlated && data['phase'] == 'applied') {
+      _deviceResponses[n] = now();
+      command.stage = CommandStage.confirmed;
+      command.detail =
+          'El Arduino confirmó el procesamiento de este comando. La actuación física requiere verificación del montaje.';
+      if (command.command.startsWith('MODO:')) {
+        event('Firmware · $n',
+            'Cambio de modo confirmado: ${command.command.substring(5)}');
+      }
     } else if (!firmware) {
       command.stage = CommandStage.bridgeAccepted;
       command.detail =
-          'Enviado al Arduino. El firmware actual no incluye request_id; ejecución sin confirmar.';
+          'Enviado al Arduino. Esperando respuesta correlacionada del firmware.';
     }
-    // Firmware text has no request ID today. Never infer confirmation from mode,
-    // serial order, same command text, or a single pending mobile request.
+    // Legacy ACKs, unrelated IDs and telemetry never confirm a transaction.
   }
 
   CommandRecord send(String command) {

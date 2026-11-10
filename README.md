@@ -99,7 +99,9 @@ sudo usermod -a -G dialout $USER
 
 ### 5. Ejecutar la aplicación
 ```bash
-streamlit run app.py
+# Linux/macOS: usar el Python del proyecto evita ejecutar Streamlit global
+.venv/bin/python -m streamlit run app.py
+# Windows: .venv\Scripts\python.exe -m streamlit run app.py
 ```
 La aplicación abrirá automáticamente el navegador en `http://localhost:8501`.
 
@@ -312,12 +314,14 @@ diagnóstico.
 La extensión móvil Flutter está en [`mobile/secado_iot_app`](mobile/secado_iot_app/README.md).
 Se conecta directamente al EMQX existente por WSS para monitoreo, gráficas,
 alertas, diagnóstico y comandos autorizados. Conserva Streamlit, SQLite y el
-puente Serial; el firmware permanece sin cambios.
+puente Serial; el firmware 1.1 añade confirmaciones transaccionales sin habilitar calefacción.
 
 La aplicación inicia en solo lectura. El control exige credenciales de operador
 y ACL verificadas en EMQX. La aceptación de envío por el puente se distingue de
-la ejecución: el firmware actual no devuelve `request_id`, por lo que las
-confirmaciones seriales no se presentan como ejecución correlacionada.
+la ejecución: con firmware 1.1 y puente actualizado, el Arduino devuelve un identificador
+serial que se traduce al `request_id` MQTT. La app solo confirma una respuesta
+correlacionada. Consulta [cómo crear una cuenta de operador](docs/emqx_operador.md)
+y [cómo compilar y cargar el firmware](docs/firmware_protocol.md).
 
 Instalación, pruebas, compilación, seguridad y demostración están en el
 [README móvil](mobile/secado_iot_app/README.md) y la matriz académica en

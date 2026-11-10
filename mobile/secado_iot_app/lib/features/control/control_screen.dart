@@ -73,9 +73,11 @@ class _ControlScreenState extends State<ControlScreen> {
         ),
         if (repo.reading?.simulated == true || repo.node.startsWith('sim'))
           const Notice('Nodo simulado: controles físicos deshabilitados.'),
+        if (repo.reading == null || !repo.fresh)
+          const Notice(
+              'Para arrancar sin telemetría, consulta ESTADO y espera la confirmación del Arduino; después aplica un modo. PARAR permanece disponible para un operador conectado.'),
         const Notice(
-          'El firmware actual responde sin request_id. Se muestra aceptación del puente, pero la ejecución queda sin confirmar. No reenvíes un comando automáticamente.',
-          warning: true,
+          'La aceptación del puente indica envío. La confirmación requiere la respuesta correlacionada del Arduino con firmware 1.1. Con firmware anterior la ejecución queda sin confirmar.',
         ),
         Panel(
           title: 'Modo operativo',

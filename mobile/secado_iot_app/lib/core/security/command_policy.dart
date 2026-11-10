@@ -25,16 +25,27 @@ abstract final class CommandPolicy {
     required bool connected,
     required bool fresh,
     required bool busy,
+    bool deviceResponsive = false,
   }) {
-    return valid(command) &&
-        authorized &&
-        connected &&
-        !busy &&
-        fresh &&
-        AppConfig.physicalNodes.contains(node) &&
+    if (!valid(command) ||
+        !authorized ||
+        !connected ||
+        busy ||
+        !AppConfig.physicalNodes.contains(node) ||
+        reading?.simulated == true ||
+        (reading != null && reading.node != node)) {
+      return false;
+    }
+    // Status and safe stop must work when telemetry is off. Startup requires
+    // a fresh, correlated response from this Arduino before enabling a mode.
+    if (command == 'ESTADO' || command == 'PARAR') {
+      return true;
+    }
+    if (command.startsWith('MODO:') && deviceResponsive) {
+      return true;
+    }
+    return fresh &&
         reading != null &&
-        reading.node == node &&
-        !reading.simulated &&
         (!command.startsWith('VENT:') || reading.mode == 'MONITOREO');
   }
 }

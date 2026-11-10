@@ -5,7 +5,7 @@ Guía consultada: `Laboratorio_11__2026.pdf`, extraída con `pdftotext` desde la
 
 ## Auditoría previa
 
-Se revisaron estructura y rama, README, `.env.example`, requisitos, `app.py`, los módulos MQTT de cliente/configuración/tópicos/mensajes/puente/adaptador/nodos virtuales, persistencia de experimentos, protocolo documentado, auditoría de fase 7, firmware y tests MQTT. Se conservaron Streamlit, Random Forest, SQLite, firmware y broker. No se leyó ni copió contenido secreto a los archivos móviles.
+Se revisaron estructura y rama, README, `.env.example`, requisitos, `app.py`, los módulos MQTT de cliente/configuración/tópicos/mensajes/puente/adaptador/nodos virtuales, persistencia de experimentos, protocolo documentado, auditoría de fase 7, firmware y tests MQTT. La auditoría inicial conservó Streamlit, Random Forest, SQLite y broker. La actualización 1.1 del firmware y puente añade correlación a petición del usuario. No se leyó ni copió contenido secreto a los archivos móviles.
 
 - La rama inicial era `feature/flutter-mqtt`; el árbol estaba limpio. Se creó la rama solicitada sin merge ni push.
 - La base inicial pasó **40 tests Python**. La regresión con las mejoras del puente pasó **48 tests**.
@@ -13,7 +13,7 @@ Se revisaron estructura y rama, README, `.env.example`, requisitos, `app.py`, lo
 - El único nodo físico configurado inicialmente es `secador_01`, presente en `.env.example`. Los simulados `sim1..sim4` proceden de `default_virtual_nodes()`. Otros selectores de Streamlit no demuestran por sí mismos hardware disponible.
 - Los nodos virtuales publican `modo="simulacion"`, `simulado=true`, sin suscribir comandos. Flutter los interpreta y bloquea control físico.
 - La consigna del firmware está entre 10 y 50 °C. VENT admite 0..255 solo en MONITOREO; `ENABLE_HEATER=0` permanece intacto.
-- El puente confirma el envío con `request_id`; los ACK/ERR seriales no incorporan ese ID. `ESTADO` responde por `estado`, no por ACK.
+- En la auditoría inicial, el firmware no devolvía IDs y ESTADO no tenía ACK. La actualización 1.1 descrita abajo incorpora ambas capacidades.
 - SQLite requiere una corrida asociada explícitamente; no hay API móvil de histórico, experimentos ni inferencia Random Forest. No se crearon endpoints ni botones para aparentar esas capacidades.
 - No se dispone de un teléfono/emulador Android ni acceso administrativo EMQX verificado. La conectividad Python observada no demuestra autorización ni funcionamiento físico.
 
@@ -75,19 +75,25 @@ Host fijo `cafes.duckdns.org`, puerto 443, ruta `/mqtt`, MQTT 3.1.1, keepalive i
 Lista blanca móvil: `MODO:MONITOREO`, `MODO:CONTROL`, `SP:10..50`, `VENT:0..255`, `ESTADO`, `PARAR`. Cada aplicación requiere confirmación explícita. La validez del ventilador depende del modo **reportado**, no del selector de modo deseado. Solo existe una solicitud móvil activa; se deshabilitan pulsaciones repetidas. No se controla el calefactor.
 
 ```text
-Pendiente → Publicado → Aceptado por puente → sin confirmación correlacionada → Timeout
-             └──────── Rechazado / Error
+Pendiente → Publicado → Aceptado por puente → Confirmado por Arduino
+                         └──────── Rechazado / Error / Timeout
 ```
 
-El modelo incluye `Confirmado por Arduino`, pero **no se alcanza con el protocolo actual**. El envío exitoso o un PUBACK MQTT no prueban ejecución. La app muestra eventos `ACK:`/`ERR:` sin asignarlos arbitrariamente a la solicitud activa; tras 12 s reporta ejecución desconocida. No convierte un cambio de telemetría en confirmación de comando. Tampoco correlaciona arbitrariamente `ESTADO` con una consulta particular.
+**Actualización 1.1:** el puente asocia cada solicitud MQTT a un ID serial aleatorio de 32 caracteres. Transmite `REQ,<wire_id>,<command>`. El firmware devuelve `ACK:...|request_id=<wire_id>` o `ERR:...|request_id=<wire_id>`. El puente restaura el `request_id` original, añade `command`, `source=firmware`, `correlated=true` y fase `applied` o `rejected`. La app exige coincidencia de nodo, ID y comando. El recibo `source=bridge`, `phase=forwarded` no confirma ejecución.
 
-Se analizó la alternativa de mantener una cola en el puente: una respuesta tardía, un ERR espontáneo de sensores o comandos de otro cliente pueden confundirse aun si el móvil solo publica uno a la vez. Una cola FIFO o una coincidencia de texto no garantizan la causalidad. Corregirlo exige que el firmware devuelva un identificador transaccional o establecer una única autoridad serial con exclusión y recuperación comprobadas. Se eligió conservar firmware y compatibilidad y hacer explícita la limitación.
+La correlación no depende del orden ni de que exista una sola solicitud en el puente: identifica correctamente comandos concurrentes de Android y Streamlit. ERR espontáneos de sensores no heredan ID. ACK desconocidos, duplicados o de más de 30 s no se correlacionan. El mapa está limitado a 256 entradas. Los clientes conservan timeout: Flutter 12 s y Streamlit 15 s. No se reenvían órdenes al reconectar.
 
-Mejoras mínimas realizadas en `src/mqtt/bridge.py`: rechazo de retained, límite de payload, verificación de tópico, rangos y modos estrictos, rechazo de saltos de línea y deduplicación de los últimos 256 `request_id` antes de escribir al serial. Los clientes de texto legado siguen funcionando, aunque no tienen protección de duplicados por ID. El caché de deduplicación es de proceso, no garantiza protección contra replay después de reiniciar el puente; la app nunca recupera ni reenvía órdenes de sesiones anteriores.
+ESTADO devuelve su línea de estado y un ACK transaccional adicional. Los comandos seriales legados siguen siendo compatibles. Un firmware anterior no reconoce los nuevos sobres; es necesario cargar el sketch actualizado. No se atribuye éxito a sus respuestas sin ID.
+
+La app permite consultar ESTADO y emitir PARAR a un nodo físico configurado cuando el operador está conectado, aun sin telemetría. Para habilitar un modo sin lecturas, exige una respuesta correlacionada del dispositivo de menos de 15 s. Esto permite iniciar el Nano, que arranca con telemetría apagada. Consigna y PWM siguen requiriendo lecturas recientes; PWM exige MONITOREO reportado. La autorización y el bloqueo de simuladores se mantienen.
+
+Streamlit también espera el ACK correlacionado antes de iniciar/pausar/reanudar corridas. Rechazo o timeout no cambian la corrida. Se evita bloquear el hilo de red paho al publicar una respuesta dentro de un callback.
+
+El sketch conserva watchdog, rangos, sensores, salidas y `ENABLE_HEATER=0`. Una trama que desborda el buffer se descarta completa. «Confirmado por Arduino» acredita procesamiento por el manejador del dispositivo, no verificación eléctrica del actuador. Protocolo, compilación y carga: [firmware_protocol.md](firmware_protocol.md).
 
 ## Seguridad y permisos EMQX
 
-**Las ACL no se instalaron ni se declaran verificadas.** Flutter inicia como Monitor. No existe edición accidental de endpoint/TLS ni un selector visual que conceda privilegios. El control exige una compilación explícita con `MQTT_ACL_VERIFIED=true`, usuario de operador configurado, conexión autenticada con credenciales completas de esa cuenta y habilitación manual para la sesión. Estos controles locales no reemplazan las ACL del broker.
+**Las ACL no se instalaron ni se declaran verificadas.** Para crear una cuenta y configurar sus reglas, consulta [la guía de operador](emqx_operador.md). Flutter inicia como Monitor. No existe edición accidental de endpoint/TLS ni un selector visual que conceda privilegios. El control exige una compilación explícita con `MQTT_ACL_VERIFIED=true`, usuario de operador configurado, conexión autenticada con credenciales completas de esa cuenta y habilitación manual para la sesión. Estos controles locales no reemplazan las ACL del broker.
 
 El administrador debe revisar las fuentes/reglas existentes, conservar permisos del puente y registrador, habilitar autenticación de aplicaciones y aplicar permisos mínimos. Se recomienda negar toda operación no permitida para las cuentas móviles, sin alterar arbitrariamente otras cuentas. La evaluación depende del orden y de las fuentes de autorización activas; consultar [la guía oficial de seguridad EMQX](https://docs.emqx.com/en/emqx/latest/guides/access-control/security-checklist.html).
 
@@ -122,7 +128,7 @@ Procedimiento pendiente para el administrador:
 | Aceptación separada de ejecución | Falsa confirmación del actuador | Modelo y repositorio | ACK sin ID no confirma; timeout probado |
 | Backoff y limpieza | Saturación/conexiones repetidas | Repositorio y transporte | Reconexión probada; límites de recursos verificados en tests |
 | Límites y rechazo de datos | Agotamiento de memoria/datos engañosos | Modelos y repositorio | Tests de rangos, duplicados, timestamp y memoria pasan |
-| Watchdog y calefactor deshabilitado existentes | Riesgo por pérdida de control | Firmware sin cambios | Inspección del código; protección física NO VERIFICADA |
+| Watchdog y calefactor deshabilitado existentes | Riesgo por pérdida de control | Firmware 1.1, protecciones conservadas | Inspección del código; protección física NO VERIFICADA |
 
 ## Validación ejecutada
 
@@ -134,9 +140,9 @@ La primera compilación con Java 25 falló porque esa instalación solo tenía J
 |---|---|
 | `flutter pub get` | VERIFICADO: dependencias resueltas; lockfile incluido |
 | `flutter analyze` | VERIFICADO en copia ASCII idéntica; sin incidencias en la ejecución de referencia |
-| `flutter test` | VERIFICADO: **40 passed**; fixtures y widgets no sustituyen Android real |
+| `flutter test` | VERIFICADO: **44 passed**; fixtures y widgets no sustituyen Android real |
 | WSS local | Conexión, SUBACK, recepción, publicación QoS1 sin retain, autenticación negativa, CA desconocida y hostname incorrecto |
-| Regresión `.venv/bin/python -m pytest tests/ -v` | VERIFICADO: 48 passed; inicialmente 40 passed |
+| Regresión `.venv/bin/python -m pytest tests/ -v` | VERIFICADO: 64 passed; inicialmente 40 passed |
 | EMQX desde Python | VERIFICADO: `check_connection --timeout 5 --node-id secador_01` conectó a cafes.duckdns.org:443 sin publicar |
 | EMQX desde Android | NO VERIFICADO: no dispositivo Android conectado |
 | `flutter devices` | Solo Linux y Chrome; no Android |
@@ -146,13 +152,14 @@ La primera compilación con Java 25 falló porque esa instalación solo tenía J
 ### Resultados finales
 
 - `flutter analyze`: **No issues found!**, exit 0, sobre copia ASCII cuyo `lib/` y `test/` se compararon con los originales mediante `diff -qr` sin diferencias.
-- `flutter test --reporter expanded`: **40 tests pasaron**, exit 0. Incluye 4 casos con transporte WSS real en loopback, validación de fechas, reconexión automática, controles, widgets de simulación, alerta crítica y error.
-- `.venv/bin/python -m pytest tests/ -v`: **48 passed**, exit 0.
-- `JAVA_HOME=/tmp/lab11-jdk21 ANDROID_HOME=/home/pandaman/Android/Sdk /tmp/lab11-flutter/bin/flutter build apk --debug`: **APK generado**, última compilación incremental en 9.7 s, exit 0.
-- APK: `mobile/secado_iot_app/build/app/outputs/flutter-apk/app-debug.apk` (161,138,952 bytes). Es un artefacto debug local, ignorado por Git.
-- SHA-256: `2700d11e95124bb086a9f571c80db429e254829b7117b735bcd97a238e35cfa6`.
+- `flutter test --reporter expanded`: **44 tests pasaron**, exit 0. Incluye 4 casos con transporte WSS real en loopback, validación de fechas, reconexión automática, controles, widgets de simulación, alerta crítica y error.
+- `.venv/bin/python -m pytest tests/ -v`: **64 passed**, exit 0.
+- `JAVA_HOME=/tmp/lab11-jdk21 ANDROID_HOME=/home/pandaman/Android/Sdk /tmp/lab11-flutter/bin/flutter build apk --debug`: **APK generado**, última compilación incremental en 10.9 s, exit 0.
+- APK: `mobile/secado_iot_app/build/app/outputs/flutter-apk/app-debug.apk` (161,138,968 bytes). Es un artefacto debug local, ignorado por Git.
+- SHA-256: `5cdbcf4fcdec71058797544b9564e4125f421f462b8e755ef8d98204a244e4b6`.
 - `apksigner verify --verbose`: **Verifies**, firma APK v2 válida; no equivale a firma de distribución para tienda.
-- `aapt2 dump badging`: paquete `pe.edu.unt.secado_iot_app`, versión `1.0.0`, mínimo Android API **24**, target **36**, permisos Internet y estado de red presentes.
+- `aapt2 dump badging`: paquete `pe.edu.unt.secado_iot_app`, versión `1.1.0`, mínimo Android API **24**, target **36**, permisos Internet y estado de red presentes.
+- Firmware Nano compilado: 17462 bytes de programa y 1318 bytes de RAM estática. HEX local en `firmware/arduino_secado/build/arduino_secado.ino.hex`, sin cargar. Los tests nativos ejecutan el manejador del sketch y el recorrido puente → sketch → ACK.
 - `git diff --check`: sin errores. No se ejecutó `integration_test` por ausencia de Android.
 
 Comandos exactos para continuar en este equipo (los SDK de `/tmp` son temporales):
@@ -185,11 +192,11 @@ FLUTTER_BIN=/tmp/lab11-flutter/bin/flutter ./tool/verify.sh
 | Selección de nodo válido | VERIFICADO | Lista explícita y validación de tópico/nodo |
 | Comandos solo autorizados | VERIFICADO local / BLOQUEADO broker | Tests de políticas; ACL reales pendientes |
 | Límites físicos y modo PWM | VERIFICADO en tests | Política móvil y tests Python de whitelist/rangos; hardware pendiente |
-| Distinguir publicación, aceptación y ejecución | VERIFICADO | Estados y tests: ACK sin correlación nunca confirma |
+| Distinguir publicación, aceptación y ejecución | VERIFICADO | Estados y tests: ACK sin correlación nunca confirma; ACK 1.1 coincidente sí confirma |
 | Desconexiones y errores | VERIFICADO en tests | Fakes de conexión y widget de error; backoff implementado |
 | Validación TLS | VERIFICADO | WSS local real, CA desconocida y hostname incorrecto rechazados |
 | No exponer credenciales | VERIFICADO por código / NO VERIFICADO almacenamiento Android | Campos ocultos, diagnóstico sanitizado, secure storage, sin secretos embebidos |
-| Pruebas ejecutadas | VERIFICADO | Suite Flutter y 48 tests Python; ver resultados finales |
+| Pruebas ejecutadas | VERIFICADO | Suite Flutter y 64 tests Python; ver resultados finales |
 | Sin regresiones Python | VERIFICADO | Suite completa pytest pasa |
 | Construcción y demostración reproducibles | VERIFICADO documentalmente | README, lockfile y script; instalación Android pendiente |
 
@@ -200,7 +207,7 @@ FLUTTER_BIN=/tmp/lab11-flutter/bin/flutter ./tool/verify.sh
 3. Guardar en Android credenciales Monitor, conectar y revisar SUBACK. Sin publicar desde el móvil, ejecutar el publicador existente `python -m src.mqtt.virtual_nodes_cli --interval 2` con credenciales autorizadas en el ordenador.
 4. Seleccionar sim1: comprobar distintivo, tres variables, gráficos y controles deshabilitados. Detener el publicador y observar stale tras 15 s; desconectar red y observar error/reconexión.
 5. Para datos físicos, iniciar un único puente `python -m src.mqtt.bridge_cli --port /dev/ttyUSB0 --node-id secador_01`. Seleccionar el nodo físico y verificar timestamp/origen.
-6. Solo tras completar ACL, usar variante Operador, habilitar sesión y confirmar una acción de banco. Comprobar el JSON/UUID, aceptación y advertencia de falta de confirmación correlacionada. Revisar físicamente el resultado sin confundirlo con el estado de la interfaz.
+6. Solo tras completar ACL, usar variante Operador, habilitar sesión y confirmar una acción de banco. Comprobar el JSON/UUID, aceptación del puente y confirmación correlacionada del Arduino actualizado. Revisar físicamente el resultado sin confundirlo con el estado de la interfaz.
 7. Capturar evidencias reales según [la lista preparada](evidencias/lab11/README.md). No hay capturas de teléfono ni fotografías fabricadas.
 
 ## Cumplimiento de las actividades académicas
@@ -210,4 +217,4 @@ FLUTTER_BIN=/tmp/lab11-flutter/bin/flutter ./tool/verify.sh
 | Extensión móvil de funcionalidades MQTT | Proyecto Android Flutter, WSS, cinco pantallas, telemetría, gráficos, control validado, alertas y diagnóstico | Implementada y probada localmente; demostración Android/hardware pendiente |
 | Avance de mecanismos de seguridad | TLS comprobado, secretos en almacenamiento seguro, políticas, solo lectura, rechazo retained, deduplicación, pruebas y procedimiento ACL | Implementado en código y tests; ACL reales y verificación en dispositivo pendientes |
 
-No se afirma cumplimiento físico integral: faltan instalación Android, prueba Android→EMQX con cuenta autorizada, permisos verificados y demostración del montaje. La correlación inequívoca de ejecución requiere evolución del protocolo y no se presenta como resuelta.
+No se afirma cumplimiento físico integral: faltan instalación Android, prueba Android→EMQX con cuenta autorizada, permisos verificados y demostración del montaje. La correlación del procesamiento se implementó en el protocolo 1.1 y se verificó con el manejador nativo del sketch y tests de la app; falta comprobarla en el montaje físico.

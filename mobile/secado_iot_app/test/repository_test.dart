@@ -161,7 +161,8 @@ void main() {
     clock = clock.add(const Duration(seconds: 20));
     repo.tick();
     expect(repo.fresh, false);
-    expect(repo.canSend('PARAR'), false);
+    expect(repo.canSend('SP:30.0'), false);
+    expect(repo.canSend('PARAR'), true);
     expect(repo.events.any((e) => e.message.contains('desactualizada')), true);
   });
   test('retained no habilita control', () async {
@@ -175,7 +176,8 @@ void main() {
       ),
     );
     expect(repo.fresh, false);
-    expect(repo.canSend('PARAR'), false);
+    expect(repo.canSend('SP:30.0'), false);
+    expect(repo.canSend('ESTADO'), true);
   });
   test('memoria acotada y alerta local', () async {
     await repo.connect();
@@ -213,5 +215,118 @@ void main() {
     } finally {
       monitor.dispose();
     }
+  });
+  test(
+      'confirmación de Arduino correlacionada, sin degradación por envío tardío',
+      () async {
+    await operator();
+    final c = repo.send('MODO:CONTROL');
+    repo.receive(WireMessage(
+        'secado/secador_01/ack',
+        jsonEncode({
+          'accepted': true,
+          'request_id': c.id,
+          'command': c.command,
+          'message': 'ACK:MODO_CONTROL_APLICADO',
+          'source': 'firmware',
+          'correlated': true,
+          'phase': 'applied',
+        })));
+    expect(c.stage, CommandStage.confirmed);
+    repo.receive(WireMessage(
+        'secado/secador_01/ack',
+        jsonEncode({
+          'accepted': true,
+          'request_id': c.id,
+          'message': 'comando enviado al Arduino',
+          'source': 'bridge',
+          'phase': 'forwarded',
+        })));
+    expect(c.stage, CommandStage.confirmed);
+    expect(
+        repo.events.any((e) => e.message.contains('Cambio de modo confirmado')),
+        true);
+  });
+  test('ID ajeno, comando distinto y ACK legado no confirman', () async {
+    await operator();
+    final c = repo.send('SP:30.0');
+    for (final change in [
+      {'request_id': 'otra-solicitud'},
+      {'command': 'SP:31.0'},
+      {'correlated': false},
+    ]) {
+      repo.receive(WireMessage(
+          'secado/secador_01/ack',
+          jsonEncode({
+            'accepted': true,
+            'request_id': c.id,
+            'command': c.command,
+            'message': 'ACK:SP_APLICADO_CONTROL',
+            'source': 'firmware',
+            'correlated': true,
+            'phase': 'applied',
+            ...change,
+          })));
+      expect(c.stage, CommandStage.published);
+    }
+  });
+  test('ERR correlacionado rechaza; una confirmación vencida no altera timeout',
+      () async {
+    await operator();
+    final c = repo.send('VENT:100');
+    repo.receive(WireMessage(
+        'secado/secador_01/ack',
+        jsonEncode({
+          'accepted': false,
+          'request_id': c.id,
+          'command': c.command,
+          'message': 'ERR:VENT_SOLO_MONITOREO',
+          'source': 'firmware',
+          'correlated': true,
+          'phase': 'rejected',
+        })));
+    expect(c.stage, CommandStage.rejected);
+    final next = repo.send('ESTADO');
+    clock = clock.add(const Duration(seconds: 13));
+    repo.tick();
+    repo.receive(WireMessage(
+        'secado/secador_01/ack',
+        jsonEncode({
+          'accepted': true,
+          'request_id': next.id,
+          'command': next.command,
+          'message': 'ACK:ESTADO_CONSULTADO',
+          'source': 'firmware',
+          'correlated': true,
+          'phase': 'applied',
+        })));
+    expect(next.stage, CommandStage.timeout);
+  });
+  test(
+      'arranque sin telemetría requiere consulta correlacionada del dispositivo',
+      () async {
+    await repo.connect();
+    repo.activateControl(true);
+    expect(repo.canSend('MODO:MONITOREO'), false);
+    expect(repo.canSend('SP:30.0'), false);
+    expect(repo.canSend('PARAR'), true);
+    final c = repo.send('ESTADO');
+    repo.receive(WireMessage(
+        'secado/secador_01/ack',
+        jsonEncode({
+          'accepted': true,
+          'request_id': c.id,
+          'command': 'ESTADO',
+          'message': 'ACK:ESTADO_CONSULTADO',
+          'source': 'firmware',
+          'correlated': true,
+          'phase': 'applied',
+        })));
+    expect(repo.canSend('MODO:MONITOREO'), true);
+    expect(repo.canSend('VENT:100'), false);
+    await repo.disconnect();
+    await repo.connect();
+    repo.activateControl(true);
+    expect(repo.canSend('MODO:MONITOREO'), false);
   });
 }

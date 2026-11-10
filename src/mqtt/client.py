@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 import logging
 import ssl
-from threading import Event, Lock
+from threading import Event, Lock, local
 from time import monotonic
 from typing import Callable, Optional
 from uuid import uuid4
@@ -48,6 +48,7 @@ class MqttClient:
         self._subscriptions: dict[str, tuple[int, Optional[MessageCallback]]] = {}
         self._last_error: Optional[str] = None
         self._started = False
+        self._callback_context = local()
 
     @property
     def is_connected(self) -> bool:
@@ -120,7 +121,9 @@ class MqttClient:
         result = self._client.publish(topic, payload, qos=qos, retain=retain)
         if result.rc != 0:
             raise MqttConnectionError(f"Publicación rechazada en {topic}; rc={result.rc}")
-        if qos > 0:
+        # A callback executes on paho's network thread. Waiting for a PUBACK
+        # here would block the same thread that must receive it.
+        if qos > 0 and not getattr(self._callback_context, "active", False):
             result.wait_for_publish(timeout=timeout)
 
     def _build_client(self) -> None:
@@ -184,9 +187,12 @@ class MqttClient:
                     break
         if subscription and subscription[1]:
             try:
+                self._callback_context.active = True
                 subscription[1](message.topic, message.payload, message.qos, message.retain)
             except Exception:
                 logger.exception("Error procesando mensaje MQTT de %s", message.topic)
+            finally:
+                self._callback_context.active = False
 
     @staticmethod
     def _topic_matches(filter_topic: str, topic: str) -> bool:

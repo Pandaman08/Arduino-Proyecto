@@ -71,7 +71,7 @@ Para incorporar otro nodo físico, el administrador debe verificarlo y editar ex
 - Gráficas con timestamps reales, puntos y discontinuidades mayores a 15 s; la consigna ausente interrumpe su serie.
 - Hasta 300 lecturas por nodo, 200 eventos y 100 comandos en memoria de sesión. No se consulta SQLite ni se promete historial remoto.
 - Alertas locales: grano >45 °C, desconexión, datos antiguos, mensajes inválidos y timeout. Los eventos del puente y firmware se identifican por separado.
-- Los comandos requieren datos no retenidos recientes, SUBACK de los tres tópicos, nodo físico, autorización, confirmación explícita y ninguna solicitud activa.
+- Los comandos requieren SUBACK de los tres tópicos, nodo físico, autorización, confirmación explícita y ninguna solicitud activa. Consigna/PWM requieren datos no retenidos recientes. ESTADO y PARAR funcionan sin telemetría; para arrancar un modo sin lecturas, consulta ESTADO y espera un ACK correlacionado reciente (15 s).
 - `SP:10..50`, `VENT:0..255` solo en MONITOREO **reportado**, `MODO:MONITOREO`, `MODO:CONTROL`, `ESTADO`, `PARAR`. Cambiar un slider no publica.
 - No se controla calefacción; `ENABLE_HEATER=0` permanece sin cambios.
 - Suspender la app cierra MQTT; al regresar se puede reconectar, siempre en solo lectura. No hay servicio ni notificaciones en segundo plano.
@@ -80,9 +80,13 @@ Para incorporar otro nodo físico, el administrador debe verificarlo y editar ex
 
 El JSON conserva `{ "command": "MODO:CONTROL", "request_id": "UUID" }` y se publica en `secado/<nodo>/cmd`, QoS 1 y `retain=false`.
 
-El puente responde con `request_id` al **enviar** al Arduino. El firmware actual responde `ACK:...` / `ERR:...` sin ese identificador. La app presenta esas respuestas como eventos sin correlación garantizada y mantiene el comando en **Aceptado por puente** hasta agotar 12 s sin confirmación correlacionada. No afirma **Confirmado por Arduino**. `ESTADO` responde en el tópico de estado y tampoco confirma una solicitud particular. No se reenvían solicitudes tras desconexión, timeout o reinicio.
+La aceptación del puente (`source=bridge`, `phase=forwarded`) solo confirma envío. Con firmware **1.1**, el puente transmite `REQ,<wire_id>,<command>`, el Nano devuelve `ACK:...|request_id=<wire_id>` o `ERR:...|request_id=<wire_id>`, y el puente recupera el UUID original.
 
-Serializar solo los comandos del móvil no soluciona las respuestas tardías ni la concurrencia con Streamlit. Para garantizar correlación se necesita un protocolo transaccional que el firmware pueda devolver, o una única autoridad con exclusión y recuperación formal; queda fuera de esta entrega para conservar el firmware.
+La app exige `source=firmware`, `correlated=true`, nodo/ID/comando coincidentes y fase `applied` para mostrar **Confirmado por Arduino**. Un ERR correlacionado se muestra como rechazo. El estado no se degrada si llega tarde la aceptación del puente. ACK desconocido, retenido, legado o posterior al timeout nunca confirma otra solicitud. `ESTADO` también tiene ACK transaccional.
+
+Debes cargar el [firmware actualizado](../../docs/firmware_protocol.md), reiniciar el puente e instalar este APK **1.1.0+2**. El firmware antiguo sigue admitiendo comandos seriales legados, pero no confirma los comandos encapsulados del puente nuevo. La confirmación del manejador Arduino no prueba por sí sola el movimiento físico del ventilador.
+
+Para crear y verificar una cuenta de operador, sigue [la guía EMQX](../../docs/emqx_operador.md). El APK generado conserva solo lectura hasta verificar permisos y construir la variante de operador descrita arriba.
 
 ## Demostración
 

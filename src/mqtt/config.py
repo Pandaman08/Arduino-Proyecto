@@ -6,8 +6,8 @@ from typing import Optional
 import os
 
 
-def load_dotenv(path: Optional[Path] = None) -> None:
-    """Carga pares simples KEY=VALUE sin sobrescribir el entorno existente."""
+def load_dotenv(path: Optional[Path] = None, *, override: bool = False) -> None:
+    """Carga KEY=VALUE; solo sobrescribe el entorno al pedir una recarga explícita."""
     dotenv_path = Path(path or ".env")
     if not dotenv_path.exists():
         return
@@ -19,7 +19,10 @@ def load_dotenv(path: Optional[Path] = None) -> None:
         key = key.strip()
         value = value.strip().strip('"').strip("'")
         if key:
-            os.environ.setdefault(key, value)
+            if override:
+                os.environ[key] = value
+            else:
+                os.environ.setdefault(key, value)
 
 
 def _bool_env(name: str, default: bool) -> bool:

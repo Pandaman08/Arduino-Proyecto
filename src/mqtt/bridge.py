@@ -6,7 +6,9 @@ from datetime import datetime, timezone
 import json
 import logging
 import re
-from threading import Event
+from threading import Event, RLock
+from time import monotonic
+from uuid import uuid4
 from typing import Optional
 
 import serial
@@ -62,6 +64,8 @@ class SerialMqttBridge:
         self.last_error: Optional[str] = None
         self._stop_event = Event()
         self._recent_request_ids = deque(maxlen=256)
+        self._requests = {}
+        self._command_lock = RLock()
 
     def start(self, connect_serial: bool = True, wait_timeout: float = 8.0) -> BridgeStatus:
         if self.simulated:
@@ -150,6 +154,9 @@ class SerialMqttBridge:
 
     def _on_command(self, topic: str, raw_payload: bytes, qos: int, retain: bool) -> None:
         """Acepta texto de firmware o JSON {command: ...}; nunca ejecuta comandos no autorizados."""
+        request_id = None
+        command = ""
+        wire_id = None
         try:
             if retain:
                 self._publish_ack("", False, "comando retenido rechazado", None)
@@ -190,18 +197,33 @@ class SerialMqttBridge:
                 self._publish_ack(command, False, "Arduino desconectado", request_id)
                 return
             if request_id is not None:
-                # Reserve before writing: uncertain serial failures must not replay an action.
-                self._recent_request_ids.append(request_id)
-            self.serial_manager.send_command(command)
+                with self._command_lock:
+                    if request_id in self._recent_request_ids:
+                        self._publish_ack(command, False, "request_id duplicado; no se reenvía", request_id)
+                        return
+                    self._recent_request_ids.append(request_id)
+                    # Wire IDs are bounded, unique per process/session, independent of
+                    # the caller's ID length. Never correlate by serial response order.
+                    wire_id = uuid4().hex
+                    if len(self._requests) >= 256:
+                        self._requests.pop(next(iter(self._requests)))
+                    self._requests[wire_id] = (request_id, command, monotonic())
+                    self.serial_manager.send_command(f"REQ,{wire_id},{command}")
+            else:
+                with self._command_lock:
+                    self.serial_manager.send_command(command)
             self._publish_ack(command, True, "comando enviado al Arduino", request_id)
         except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as error:
             self._publish_ack("", False, f"payload inválido: {error}", None)
         except (serial.SerialException, OSError) as error:
-            self._publish_ack("", False, f"error serial: {error}", None)
+            if wire_id is not None:
+                with self._command_lock:
+                    self._requests.pop(wire_id, None)
+            self._publish_ack(command, False, "error serial; resultado desconocido, no se reenvía", request_id)
             self.serial_manager.close()
 
     def _publish_ack(self, command: str, accepted: bool, message: str, request_id: Optional[str]) -> None:
-        payload = {"node_id": self.node_id, "timestamp": utc_timestamp(), "command": command, "accepted": accepted, "message": message, "simulado": False, "version": "1.0"}
+        payload = {"node_id": self.node_id, "timestamp": utc_timestamp(), "command": command, "accepted": accepted, "message": message, "simulado": False, "version": "1.1", "source": "bridge", "correlated": False, "phase": "forwarded" if accepted else "rejected"}
         if request_id is not None:
             payload["request_id"] = request_id
         try:
@@ -218,8 +240,18 @@ class SerialMqttBridge:
             "accepted": accepted,
             "message": raw_line,
             "simulado": False,
-            "version": "1.0",
+            "version": "1.1",
+            "source": "firmware",
+            "correlated": False,
         }
+        match = re.fullmatch(r"(ACK|ERR):([^\r\n|]+)\|request_id=([A-Za-z0-9_-]{1,36})", raw_line)
+        if match:
+            with self._command_lock:
+                request = self._requests.pop(match[3], None)
+            if request is not None and monotonic() - request[2] <= 30:
+                payload.update(request_id=request[0], command=request[1], correlated=True,
+                               phase="applied" if accepted else "rejected")
+            payload["message"] = f"{match[1]}:{match[2]}"
         try:
             self.mqtt_client.publish(self.topics.ack, json.dumps(payload, separators=(",", ":")), qos=1)
         except MqttConnectionError as error:

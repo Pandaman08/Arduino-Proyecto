@@ -62,8 +62,10 @@ float tempAmbiente = 0.0;
 float humedadAmbiente = 0.0;
 float tempGrano = 0.0;
 
-char commandBuffer[80];
+char commandBuffer[96];
 uint8_t commandLength = 0;
+char currentRequestId[37] = "";
+bool discardingCommand = false;
 
 const char* modeName() {
   return modoActual == MODE_CONTROL ? "CONTROL" : "MONITOREO";
@@ -108,12 +110,22 @@ void alarmOutputs() {
 
 void ack(const String& message) {
   Serial.print("ACK:");
-  Serial.println(message);
+  Serial.print(message);
+  if (currentRequestId[0]) {
+    Serial.print("|request_id=");
+    Serial.print(currentRequestId);
+  }
+  Serial.println();
 }
 
 void err(const String& message) {
   Serial.print("ERR:");
-  Serial.println(message);
+  Serial.print(message);
+  if (currentRequestId[0]) {
+    Serial.print("|request_id=");
+    Serial.print(currentRequestId);
+  }
+  Serial.println();
 }
 
 void refreshControlWatchdog() {
@@ -279,11 +291,16 @@ void startSensorSample() {
 void processCommand(String command) {
   command.trim();
   if (command.length() == 0) return;
+  if (command.length() > 40) {
+    err("COMANDO_DEMASIADO_LARGO");
+    return;
+  }
   String upper = command;
   upper.toUpperCase();
 
   if (upper == "ESTADO") {
     showStatus();
+    if (currentRequestId[0]) ack("ESTADO_CONSULTADO");
     return;
   }
   if (upper == "PARAR" || upper == "P") {
@@ -357,19 +374,53 @@ void processCommand(String command) {
   err("COMANDO_INVALIDO");
 }
 
+// Keep correlation scoped to this synchronous handler. Sensor/watchdog ERR
+// emitted from loop() never inherit the last command's identifier.
+void processSerialCommand(String line) {
+  currentRequestId[0] = '\0';
+  if (line.startsWith("REQ,")) {
+    int separator = line.indexOf(',', 4);
+    if (separator < 5 || separator > 40) {
+      err("REQUEST_ID_INVALIDO");
+      return;
+    }
+    String requestId = line.substring(4, separator);
+    for (unsigned int i = 0; i < requestId.length(); i++) {
+      char c = requestId[i];
+      if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') || c == '_' || c == '-')) {
+        err("REQUEST_ID_INVALIDO");
+        return;
+      }
+    }
+    requestId.toCharArray(currentRequestId, sizeof(currentRequestId));
+    String command = line.substring(separator + 1);
+    command.trim();
+    if (command.length() == 0) err("COMANDO_INVALIDO");
+    else processCommand(command);
+  } else {
+    processCommand(line);
+  }
+  currentRequestId[0] = '\0';
+}
+
 void readSerialCommands() {
   while (Serial.available() > 0) {
     char c = (char)Serial.read();
     if (c == '\n' || c == '\r') {
-      if (commandLength > 0) {
+      if (!discardingCommand && commandLength > 0) {
         commandBuffer[commandLength] = '\0';
-        processCommand(String(commandBuffer));
-        commandLength = 0;
+        processSerialCommand(String(commandBuffer));
       }
+      commandLength = 0;
+      discardingCommand = false;
+    } else if (discardingCommand) {
+      continue;
     } else if (commandLength < sizeof(commandBuffer) - 1) {
       commandBuffer[commandLength++] = c;
     } else {
       commandLength = 0;
+      discardingCommand = true;
       err("COMANDO_DEMASIADO_LARGO");
     }
   }

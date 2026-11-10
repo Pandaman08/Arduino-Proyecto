@@ -21,7 +21,7 @@ from src.persistence import (
     ExperimentManager, ExperimentPhase, ExperimentStatus, GrainType,
     HistoryRepository, MeasurementOrigin, initialize_database,
 )
-from src.mqtt.streamlit_adapter import create_optional_streamlit_subscriber
+from src.mqtt.streamlit_adapter import StreamlitMqttConnection
 from src.services.monitoring import TelemetryProcessor
 from src.services.bridge_process import BridgeProcessManager
 from src.ui import CUSTOM_CSS, render_footer, render_header
@@ -43,7 +43,7 @@ def get_predictor():
 
 @st.cache_resource(show_spinner="Preparando consumidor MQTT...")
 def get_mqtt():
-    return create_optional_streamlit_subscriber()
+    return StreamlitMqttConnection()
 
 
 @st.cache_resource(show_spinner=False)
@@ -55,7 +55,8 @@ database = get_database()
 manager = ExperimentManager(database)
 history_repo = HistoryRepository(database)
 predictor, model_eval = get_predictor()
-mqtt_subscriber, mqtt_status = get_mqtt()
+mqtt_connection = get_mqtt()
+mqtt_subscriber, mqtt_status = mqtt_connection.get()
 bridge_manager = get_bridge_manager()
 processor = TelemetryProcessor(predictor)
 
@@ -84,7 +85,19 @@ def poll_mqtt() -> None:
             st.session_state.last_ack = message
             st.session_state.command_log.append({"timestamp": message.get("timestamp", utc_now()), **message})
             pending = st.session_state.pending_command
-            if pending and message.get("accepted") and pending.get("request_id") == message.get("request_id"):
+            if (pending and message.get("accepted") is False and not message.get("_retained")
+                    and pending.get("request_id") == message.get("request_id")
+                    and pending.get("node_id") == message.get("node_id")
+                    and pending.get("command") == message.get("command")):
+                st.session_state.last_error = "Comando rechazado; la corrida no cambia de estado."
+                st.session_state.pending_command = None
+                continue
+            if (pending and message.get("accepted") is True
+                    and message.get("source") == "firmware" and message.get("correlated") is True
+                    and message.get("phase") == "applied" and not message.get("_retained")
+                    and pending.get("request_id") == message.get("request_id")
+                    and pending.get("node_id") == message.get("node_id")
+                    and pending.get("command") == message.get("command")):
                 if pending["action"] == "start":
                     try:
                         manager.start(pending["experiment_id"])
@@ -108,6 +121,12 @@ def poll_mqtt() -> None:
             message["_received_at"] = utc_now()
             st.session_state.telemetry.append(message)
             st.session_state.telemetry = st.session_state.telemetry[-300:]
+    pending = st.session_state.pending_command
+    if pending and pending.get("created_at"):
+        created = datetime.fromisoformat(pending["created_at"].replace("Z", "+00:00"))
+        if (datetime.now(timezone.utc) - created).total_seconds() >= 15:
+            st.session_state.last_error = "Sin confirmación correlacionada del Arduino; resultado desconocido."
+            st.session_state.pending_command = None
 
 
 def publish_command(command: str, action: Optional[str] = None, experiment_id: Optional[int] = None) -> bool:
@@ -121,7 +140,7 @@ def publish_command(command: str, action: Optional[str] = None, experiment_id: O
         st.session_state.last_error = str(error)
         st.error(f"No se pudo enviar el comando: {error}")
         return False
-    st.session_state.pending_command = {"request_id": request_id, "command": command, "action": action, "experiment_id": experiment_id}
+    st.session_state.pending_command = {"request_id": request_id, "node_id": st.session_state.selected_node, "command": command, "action": action, "experiment_id": experiment_id, "created_at": utc_now()}
     return True
 
 
@@ -174,7 +193,11 @@ def render_sidebar() -> None:
     st.sidebar.checkbox("Modo demostración (datos simulados)", key="demo_mode")
     mqtt_online = bool(mqtt_subscriber and mqtt_subscriber.is_connected)
     st.sidebar.markdown(f"**EMQX:** {'🟢 Conectado' if mqtt_online else '🔴 No disponible'}")
-    st.sidebar.caption(mqtt_status if mqtt_subscriber is not None else "Deshabilitado por configuración")
+    st.sidebar.caption(mqtt_status)
+    if st.sidebar.button("Reconectar EMQX", help="Recarga .env y vuelve a conectar sin reiniciar Streamlit."):
+        with st.spinner("Conectando con EMQX..."):
+            mqtt_connection.get(force=True)
+        st.rerun()
     st.sidebar.markdown(f"**Puente Serial/MQTT:** {bridge_manager.status()}")
     if bridge_manager.running:
         if st.sidebar.button("⏹ Detener puente", use_container_width=True):
