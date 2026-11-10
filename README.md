@@ -306,3 +306,19 @@ diagnóstico.
 - La siguiente fase puede abordar mejoras adicionales de despliegue, pero esta
   versión no incorpora Google Earth Engine, servicios cloud nuevos ni otro
   broker MQTT.
+
+## Aplicación Android · Laboratorio 11
+
+La extensión móvil Flutter está en [`mobile/secado_iot_app`](mobile/secado_iot_app/README.md).
+Se conecta directamente al EMQX existente por WSS para monitoreo, gráficas,
+alertas, diagnóstico y comandos autorizados. Conserva Streamlit, SQLite y el
+puente Serial; el firmware permanece sin cambios.
+
+La aplicación inicia en solo lectura. El control exige credenciales de operador
+y ACL verificadas en EMQX. La aceptación de envío por el puente se distingue de
+la ejecución: el firmware actual no devuelve `request_id`, por lo que las
+confirmaciones seriales no se presentan como ejecución correlacionada.
+
+Instalación, pruebas, compilación, seguridad y demostración están en el
+[README móvil](mobile/secado_iot_app/README.md) y la matriz académica en
+[`docs/lab11_mobile.md`](docs/lab11_mobile.md).

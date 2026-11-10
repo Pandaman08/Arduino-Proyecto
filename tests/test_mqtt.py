@@ -253,3 +253,35 @@ def test_virtual_nodes_are_reproducible_separate_and_never_subscribe_commands():
     assert all(payload.simulado for payload in first_payloads)
     assert [topic for topic, *_ in first.mqtt_client.published] == ["secado/sim1/telemetria", "secado/sim2/telemetria"]
     assert first.mqtt_client.subscriptions == []
+
+
+@pytest.mark.parametrize('command', ['SP:51', 'SP:nan', 'VENT:256', 'VENT:-1', 'MODO:INVALIDO', 'SP:30\nPARAR'])
+def test_bridge_strict_command_validation(command):
+    serial_port = FakeSerial([])
+    mqtt = FakeMqtt()
+    bridge = SerialMqttBridge(serial_port, mqtt, 'secador_01')
+    bridge._on_command(bridge.topics.command, json.dumps({'command': command}).encode(), 1, False)
+    assert serial_port.sent == []
+    assert json.loads(mqtt.published[-1][1])['accepted'] is False
+
+
+def test_bridge_rejects_retained_and_deduplicates_request_id():
+    serial_port = FakeSerial([])
+    mqtt = FakeMqtt()
+    bridge = SerialMqttBridge(serial_port, mqtt, 'secador_01')
+    payload = b'{"command":"SP:30","request_id":"mobile-unique"}'
+    bridge._on_command(bridge.topics.command, payload, 1, True)
+    assert serial_port.sent == []
+    bridge._on_command(bridge.topics.command, payload, 1, False)
+    bridge._on_command(bridge.topics.command, payload, 1, False)
+    assert serial_port.sent == ['SP:30']
+    assert json.loads(mqtt.published[-1][1])['accepted'] is False
+
+
+def test_bridge_does_not_invent_firmware_request_correlation():
+    mqtt = FakeMqtt()
+    bridge = SerialMqttBridge(FakeSerial(['ACK:MODO_CONTROL_APLICADO']), mqtt, 'secador_01')
+    bridge._on_command(bridge.topics.command, b'{"command":"MODO:CONTROL","request_id":"mobile-unique"}', 1, False)
+    bridge.run_once()
+    assert json.loads(mqtt.published[0][1])['request_id'] == 'mobile-unique'
+    assert 'request_id' not in json.loads(mqtt.published[-1][1])

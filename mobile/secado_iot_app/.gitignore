@@ -1,0 +1,8 @@
+# Flutter generated files and IDE metadata
+.dart_tool/
+.flutter-plugins*
+.packages
+build/
+coverage/
+*.iml
+.idea/

@@ -72,3 +72,11 @@ data/.serial-*.lock
 firmware/**/build/
 *.hex
 *.elf
+
+# Flutter app sources (the Python lib/ rule must not hide Dart code)
+!mobile/secado_iot_app/lib/
+!mobile/secado_iot_app/lib/**
+mobile/**/.dart_tool/
+mobile/**/.flutter-plugins*
+mobile/**/coverage/
+mobile/**/android/.kotlin/

@@ -1,9 +1,11 @@
 """Puente independiente Arduino Nano (USB/Serial) ↔ MQTT."""
 
 from dataclasses import dataclass
+from collections import deque
 from datetime import datetime, timezone
 import json
 import logging
+import re
 from threading import Event
 from typing import Optional
 
@@ -59,6 +61,7 @@ class SerialMqttBridge:
         self.sequence = 0
         self.last_error: Optional[str] = None
         self._stop_event = Event()
+        self._recent_request_ids = deque(maxlen=256)
 
     def start(self, connect_serial: bool = True, wait_timeout: float = 8.0) -> BridgeStatus:
         if self.simulated:
@@ -148,19 +151,37 @@ class SerialMqttBridge:
     def _on_command(self, topic: str, raw_payload: bytes, qos: int, retain: bool) -> None:
         """Acepta texto de firmware o JSON {command: ...}; nunca ejecuta comandos no autorizados."""
         try:
+            if retain:
+                self._publish_ack("", False, "comando retenido rechazado", None)
+                return
+            if topic != self.topics.command or len(raw_payload) > 1024:
+                self._publish_ack("", False, "tópico o tamaño inválido", None)
+                return
             decoded = raw_payload.decode("utf-8").strip()
             request_id = None
             if decoded.startswith("{"):
                 command_payload = json.loads(decoded)
-                command = str(command_payload.get("command", ""))
+                command = command_payload.get("command", "")
                 request_id = command_payload.get("request_id")
             else:
                 command = decoded
-            command = command.rstrip("\n")
+            if not isinstance(command, str):
+                raise ValueError("command debe ser texto")
+            if request_id is not None:
+                if not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", request_id):
+                    raise ValueError("request_id inválido")
+                if request_id in self._recent_request_ids:
+                    self._publish_ack(command, False, "request_id duplicado; no se reenvía", request_id)
+                    return
             upper_command = command.upper()
             allowed = (
                 upper_command in self.ALLOWED_COMMANDS
-                or upper_command.startswith(("T:", "D:", "SP:", "VENT:", "MODO:"))
+                or upper_command in {"MODO:MONITOREO", "MODO:CONTROL", "MODO:ANTES", "MODO:DESPUES", "MODO:DESPUÉS"}
+                or (bool(re.fullmatch(r"(?:SP|T):\d{1,2}(?:\.\d+)?", upper_command))
+                    and 10 <= float(upper_command.split(":")[1]) <= 50)
+                or (bool(re.fullmatch(r"VENT:\d{1,3}", upper_command))
+                    and 0 <= int(upper_command.split(":")[1]) <= 255)
+                or (upper_command.startswith("D:") and command.isprintable())
             )
             if not allowed or len(command) > 40:
                 self._publish_ack(command, False, "comando no autorizado", request_id)
@@ -168,6 +189,9 @@ class SerialMqttBridge:
             if not self.serial_manager.is_open():
                 self._publish_ack(command, False, "Arduino desconectado", request_id)
                 return
+            if request_id is not None:
+                # Reserve before writing: uncertain serial failures must not replay an action.
+                self._recent_request_ids.append(request_id)
             self.serial_manager.send_command(command)
             self._publish_ack(command, True, "comando enviado al Arduino", request_id)
         except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as error:
