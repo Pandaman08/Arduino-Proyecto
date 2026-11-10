@@ -5,13 +5,15 @@ Implementa el algoritmo Random Forest Regressor con tipado y validación de mét
 
 from dataclasses import dataclass
 from pathlib import Path
+import warnings
 from typing import Optional, Tuple
 import joblib
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
+from sklearn.exceptions import InconsistentVersionWarning
 from sklearn.metrics import mean_absolute_error, r2_score
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import GroupShuffleSplit, train_test_split
 
 from ..config import (
     DATASET_PATH,
@@ -32,6 +34,11 @@ class ModelEvaluation:
     samples_count: int
     r2_score: Optional[float] = None
     mae_hours: Optional[float] = None
+    dataset_origin: str = "sintético local"
+    feature_columns: tuple[str, ...] = tuple(FEATURE_COLUMNS)
+    target_column: str = TARGET_COLUMN
+    split_strategy: str = "aleatoria por fila; solo válida para demo sintética"
+    compatibility_note: Optional[str] = None
 
 
 def create_synthetic_dataset(csv_path: Path, n_samples: int = 800) -> pd.DataFrame:
@@ -81,22 +88,39 @@ class DryingPredictor:
         """Carga el modelo pre-entrenado desde el archivo .pkl."""
         if not self.model_path.exists():
             raise FileNotFoundError(f"No se encontró el archivo del modelo en '{self.model_path}'.")
-        self.model = joblib.load(self.model_path)
+        with warnings.catch_warnings(record=True) as captured:
+            warnings.simplefilter("always", InconsistentVersionWarning)
+            model = joblib.load(self.model_path)
+        if any(issubclass(item.category, InconsistentVersionWarning) for item in captured):
+            raise RuntimeError("El modelo serializado fue creado con otra versión de scikit-learn; se reentrenará localmente.")
+        self.model = model
+
+    def _read_dataset(self) -> pd.DataFrame:
+        if not self.dataset_path.exists():
+            create_synthetic_dataset(self.dataset_path)
+        df = pd.read_csv(self.dataset_path)
+        required_cols = FEATURE_COLUMNS + [TARGET_COLUMN]
+        missing = [col for col in required_cols if col not in df.columns]
+        if missing:
+            raise ValueError(f"Faltan columnas obligatorias en el dataset: {missing}")
+        return df
+
+    def _evaluation(self, df: pd.DataFrame, model: RandomForestRegressor) -> ModelEvaluation:
+        X_train, X_test, y_train, y_test = train_test_split(
+            df[FEATURE_COLUMNS], df[TARGET_COLUMN], test_size=0.2, random_state=RF_RANDOM_STATE
+        )
+        y_pred = model.predict(X_test)
+        return ModelEvaluation(
+            is_newly_trained=False, samples_count=len(df),
+            r2_score=float(r2_score(y_test, y_pred)),
+            mae_hours=float(mean_absolute_error(y_test, y_pred)),
+        )
 
     def train(self) -> ModelEvaluation:
         """
         Entrena un nuevo modelo Random Forest a partir del dataset local y lo persiste en disco.
         """
-        if not self.dataset_path.exists():
-            create_synthetic_dataset(self.dataset_path)
-
-        df = pd.read_csv(self.dataset_path)
-
-        # Validación estricta de estructura tabular
-        required_cols = FEATURE_COLUMNS + [TARGET_COLUMN]
-        missing = [col for col in required_cols if col not in df.columns]
-        if missing:
-            raise ValueError(f"Faltan columnas obligatorias en el dataset: {missing}")
+        df = self._read_dataset()
 
         X = df[FEATURE_COLUMNS]
         y = df[TARGET_COLUMN]
@@ -126,6 +150,34 @@ class DryingPredictor:
             samples_count=len(df),
             r2_score=r2,
             mae_hours=mae
+        )
+
+    def train_from_labeled_runs(self, df: pd.DataFrame) -> ModelEvaluation:
+        """Prepara entrenamiento futuro con etiquetas reales y separación por corrida/lote.
+
+        No se invoca automáticamente: requiere columnas de entrada, objetivo y
+        ``run_id`` para evitar fuga temporal entre entrenamiento y prueba.
+        """
+        required = FEATURE_COLUMNS + [TARGET_COLUMN, "run_id"]
+        missing = [column for column in required if column not in df.columns]
+        if missing:
+            raise ValueError(f"Faltan columnas para entrenamiento por corrida: {missing}")
+        if df["run_id"].nunique() < 2:
+            raise ValueError("Se requieren al menos dos corridas/lotes etiquetados")
+        splitter = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=RF_RANDOM_STATE)
+        train_idx, test_idx = next(splitter.split(df, groups=df["run_id"]))
+        model = RandomForestRegressor(n_estimators=RF_N_ESTIMATORS, max_depth=RF_MAX_DEPTH, random_state=RF_RANDOM_STATE, n_jobs=1)
+        model.fit(df.iloc[train_idx][FEATURE_COLUMNS], df.iloc[train_idx][TARGET_COLUMN])
+        prediction = model.predict(df.iloc[test_idx][FEATURE_COLUMNS])
+        self.model_path.parent.mkdir(parents=True, exist_ok=True)
+        joblib.dump(model, self.model_path)
+        self.model = model
+        return ModelEvaluation(
+            is_newly_trained=True, samples_count=len(df),
+            r2_score=float(r2_score(df.iloc[test_idx][TARGET_COLUMN], prediction)) if len(test_idx) >= 2 else None,
+            mae_hours=float(mean_absolute_error(df.iloc[test_idx][TARGET_COLUMN], prediction)),
+            dataset_origin="datos reales etiquetados por corrida/lote",
+            split_strategy="GroupShuffleSplit por run_id",
         )
 
     def predict(self, temp_ambiente: float, humedad_ambiente: float, temp_grano: float) -> float:
@@ -171,7 +223,8 @@ def load_or_train_predictor(
     if model_path.exists():
         try:
             predictor.load()
-            return predictor, ModelEvaluation(is_newly_trained=False, samples_count=0)
+            evaluation = predictor._evaluation(predictor._read_dataset(), predictor.model)
+            return predictor, evaluation
         except Exception:
             # Si el archivo está corrupto o es de otra versión, reentrenar
             pass

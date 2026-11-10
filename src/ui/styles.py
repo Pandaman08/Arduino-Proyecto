@@ -70,6 +70,34 @@ CUSTOM_CSS = """
         font-size: 0.82rem;
         font-weight: 600;
     }
+    .badge-normal, .status-normal {
+        background-color: rgba(0, 180, 216, 0.2);
+        color: #caf0f8;
+    }
+    .badge-final, .status-final {
+        background-color: rgba(46, 204, 113, 0.25);
+        color: #a3e635;
+    }
+    .badge-danger, .alert-danger {
+        background-color: rgba(239, 68, 68, 0.3);
+        color: #fca5a5;
+        border: 1px solid #ef4444;
+    }
+
+    /* Estado del lazo cerrado de temperatura */
+    .semaforo-banner {
+        border-radius: 12px;
+        padding: 1rem 1.4rem;
+        margin: 0.9rem 0;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.15);
+    }
+    .semaforo-verde { background: linear-gradient(135deg, rgba(34,197,94,.18), rgba(22,101,52,.35)); border: 2px solid #22c55e; color: #bbf7d0; }
+    .semaforo-amarillo { background: linear-gradient(135deg, rgba(234,179,8,.18), rgba(133,77,14,.35)); border: 2px solid #eab308; color: #fef08a; }
+    .semaforo-rojo { background: linear-gradient(135deg, rgba(239,68,68,.2), rgba(127,29,29,.38)); border: 2px solid #ef4444; color: #fecaca; }
+    .badge-semaforo-pill { padding: 6px 14px; border-radius: 20px; font-weight: 700; font-size: .85rem; background: rgba(0,0,0,.35); border: 1px solid rgba(255,255,255,.2); }
     .status-normal {
         background-color: rgba(0, 180, 216, 0.2);
         color: #caf0f8;

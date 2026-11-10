@@ -21,6 +21,7 @@ from ..config import (
     SERIAL_STABILIZATION_DELAY,
     DEFAULT_BAUDRATE
 )
+from .port_lock import SerialPortInUseError, SerialPortLease
 
 
 @dataclass(frozen=True)
@@ -33,6 +34,17 @@ class TelemetryReading:
     def as_tuple(self) -> Tuple[float, float, float]:
         """Devuelve los valores en tupla para procesamiento numérico."""
         return (self.temp_ambiente, self.humedad_ambiente, self.temp_grano)
+
+
+@dataclass(frozen=True)
+class SerialTelemetryFrame:
+    """Trama enriquecida del firmware, manteniendo compatibilidad con CSV antiguo."""
+    reading: TelemetryReading
+    sequence: Optional[int] = None
+    setpoint: Optional[float] = None
+    mode: Optional[str] = None
+    heater_state: Optional[str] = None
+    fan_pwm: Optional[int] = None
 
 
 def detect_available_ports() -> List[str]:
@@ -88,11 +100,55 @@ def parse_telemetry_line(raw_line: str) -> Optional[TelemetryReading]:
     )
 
 
-def generate_simulated_telemetry() -> TelemetryReading:
-    """Genera lecturas sintéticas consistentes con la física del secado para pruebas sin hardware."""
+def parse_telemetry_frame(raw_line: str) -> Optional[SerialTelemetryFrame]:
+    """Parsea ``TEL,seq,t_amb,hum,t_grano,sp,modo,foco,vent`` o el CSV legado."""
+    line = raw_line.strip()
+    if not line:
+        return None
+    if not line.upper().startswith("TEL,"):
+        reading = parse_telemetry_line(line)
+        return None if reading is None else SerialTelemetryFrame(reading=reading)
+    parts = [part.strip() for part in line.split(",")]
+    if len(parts) != 9:
+        raise ValueError(f"Trama TEL incompleta ({len(parts)} campos recibidos, esperados 9): '{line}'")
+    try:
+        sequence = int(parts[1])
+        setpoint = None if parts[5].upper() in {"", "NA", "NULL"} else float(parts[5])
+        fan_pwm = None if parts[8].upper() in {"", "NA", "NULL"} else int(parts[8])
+    except ValueError as error:
+        raise ValueError(f"Campos TEL no numéricos: '{line}'") from error
+    if sequence < 0:
+        raise ValueError("sequence no puede ser negativo")
+    if setpoint is not None and not 10.0 <= setpoint <= 50.0:
+        raise ValueError(f"setpoint fuera de rango: {setpoint}")
+    if fan_pwm is not None and not 0 <= fan_pwm <= 255:
+        raise ValueError(f"PWM fuera de rango: {fan_pwm}")
+    mode = parts[6].upper()
+    if mode not in {"MONITOREO", "CONTROL"}:
+        raise ValueError(f"modo serial inválido: {parts[6]}")
+    heater_state = None if parts[7].upper() in {"", "NA", "NULL"} else parts[7]
+    reading = parse_telemetry_line(",".join(parts[2:5]))
+    return SerialTelemetryFrame(reading, sequence, setpoint, mode, heater_state, fan_pwm)
+
+
+def generate_simulated_telemetry(
+    ideal_temperature: Optional[float] = None,
+    previous_grain: Optional[float] = None,
+) -> TelemetryReading:
+    """Genera telemetría sintética, opcionalmente siguiendo el lazo térmico de la demo."""
     sim_temp_amb = round(float(np.random.uniform(22.0, 36.0)), 1)
     sim_hum_amb = round(float(np.random.uniform(45.0, 75.0)), 1)
-    sim_temp_grano = round(sim_temp_amb + float(np.random.uniform(-1.0, 4.0)), 1)
+    if ideal_temperature is None or previous_grain is None:
+        sim_temp_grano = round(sim_temp_amb + float(np.random.uniform(-1.0, 4.0)), 1)
+    else:
+        error = previous_grain - ideal_temperature
+        if abs(error) > 2.2:
+            grain = previous_grain - 0.8
+        elif abs(error) > 0.8:
+            grain = previous_grain - 0.4
+        else:
+            grain = ideal_temperature + float(np.random.choice([-0.2, 0.0, 0.2, 1.8], p=[0.3, 0.4, 0.2, 0.1]))
+        sim_temp_grano = round(grain, 1)
     
     return TelemetryReading(
         temp_ambiente=sim_temp_amb,
@@ -112,10 +168,13 @@ class SerialManager:
         self.baudrate = baudrate
         self.timeout = timeout
         self._serial: Optional[serial.Serial] = None
+        self._lease: Optional[SerialPortLease] = None
 
     def connect(self) -> None:
         """Abre la conexión serial y estabiliza el microcontrolador."""
+        lease = SerialPortLease(self.port)
         try:
+            lease.acquire()
             self._serial = serial.Serial(
                 port=self.port,
                 baudrate=self.baudrate,
@@ -126,8 +185,17 @@ class SerialManager:
             self._serial.reset_input_buffer()
             time.sleep(SERIAL_STABILIZATION_DELAY)
         except serial.SerialException as err:
+            lease.release()
             self._serial = None
             raise serial.SerialException(f"No fue posible abrir el puerto serial '{self.port}': {err}")
+        except SerialPortInUseError as err:
+            self._serial = None
+            raise serial.SerialException(str(err)) from err
+        except Exception:
+            lease.release()
+            self._serial = None
+            raise
+        self._lease = lease
 
     def is_open(self) -> bool:
         """Indica si el puerto se encuentra abierto."""
@@ -147,6 +215,15 @@ class SerialManager:
 
         return raw_bytes.decode('utf-8', errors='ignore').strip()
 
+    def send_command(self, command: str) -> None:
+        """Envía un comando textual al firmware usando una única interfaz de transporte."""
+        if not self.is_open():
+            raise serial.SerialException("Intento de escritura con puerto serial cerrado.")
+
+        payload = command if command.endswith("\n") else f"{command}\n"
+        self._serial.write(payload.encode("utf-8"))
+        self._serial.flush()
+
     def close(self) -> None:
         """Cierra de forma segura el descriptor de archivo del puerto serie."""
         if self._serial is not None:
@@ -157,6 +234,9 @@ class SerialManager:
                 pass
             finally:
                 self._serial = None
+                if self._lease is not None:
+                    self._lease.release()
+                    self._lease = None
 
     def __enter__(self):
         self.connect()
