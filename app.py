@@ -108,7 +108,6 @@ def poll_mqtt() -> None:
             message["_received_at"] = utc_now()
             st.session_state.telemetry.append(message)
             st.session_state.telemetry = st.session_state.telemetry[-300:]
-            st.session_state.selected_node = message.get("node_id", st.session_state.selected_node)
 
 
 def publish_command(command: str, action: Optional[str] = None, experiment_id: Optional[int] = None) -> bool:
@@ -145,7 +144,7 @@ def demo_reading() -> None:
 def current_frame() -> Optional[dict]:
     node = st.session_state.selected_node
     candidates = [item for item in st.session_state.telemetry if item.get("node_id") == node]
-    return candidates[-1] if candidates else (st.session_state.telemetry[-1] if st.session_state.telemetry else None)
+    return candidates[-1] if candidates else None
 
 
 def frame_df() -> pd.DataFrame:

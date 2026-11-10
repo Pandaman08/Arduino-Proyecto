@@ -26,8 +26,13 @@ class BridgeProcessManager:
         if not Path(port).exists():
             self.last_error = f"el puerto serial no existe: {port}"
             return False
+        project_root = Path(__file__).resolve().parents[2]
+        virtualenv_python = project_root / ".venv" / "bin" / "python"
+        if not virtualenv_python.exists():
+            virtualenv_python = project_root / ".venv" / "Scripts" / "python.exe"
+        interpreter = str(virtualenv_python) if virtualenv_python.exists() else sys.executable
         command = [
-            sys.executable, "-m", "src.mqtt.bridge_cli",
+            interpreter, "-m", "src.mqtt.bridge_cli",
             "--port", port, "--baudrate", str(baudrate), "--node-id", node_id,
         ]
         try:

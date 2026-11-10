@@ -7,7 +7,7 @@ import json
 from typing import Optional
 
 from .client import MqttClient, MqttConnectionError
-from .config import MqttSettings
+from .config import MqttSettings, load_dotenv
 from .messages import parse_telemetry_payload
 from .topics import MqttTopics
 
@@ -70,6 +70,9 @@ class StreamlitMqttSubscriber:
 
 def create_optional_streamlit_subscriber() -> tuple[Optional[StreamlitMqttSubscriber], str]:
     """Solo conecta si MQTT_STREAMLIT_ENABLED=true; por defecto no toca el broker."""
+    # El indicador debe poder configurarse en el .env local antes de consultar
+    # os.environ; MqttSettings.from_env() lo carga después, demasiado tarde.
+    load_dotenv()
     if os.getenv("MQTT_STREAMLIT_ENABLED", "false").lower() not in {"1", "true", "yes", "on"}:
         return None, "deshabilitado (MQTT_STREAMLIT_ENABLED no está activo)"
     settings = MqttSettings.from_env()
